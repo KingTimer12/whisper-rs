@@ -160,14 +160,15 @@ def test_auto_detected_language_is_a_nonempty_string(tmp_path):
     assert info.language != ""
 
 
-@pytest.mark.model
-def test_word_timestamps_are_absent_unless_requested(tmp_path):
-    model = whisper_rs.WhisperModel("tiny")
-    audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
-
-    segments, _ = model.transcribe(str(audio), word_timestamps=False)
-    for seg in segments:
-        assert seg.words is None
+# `test_word_timestamps_are_absent_unless_requested` used to live here as a
+# synthetic-audio test, but the tone burst `write_speechlike_wav` produces
+# yields zero segments, so its `for seg in segments: assert seg.words is
+# None` loop body never ran -- the test could not fail no matter what the
+# code did. On Linux CI, where the real-speech test below is skipped (no
+# `say`), that left `word_timestamps=False` with no live coverage at all.
+# The check now lives inside `test_word_timestamps_are_plausible_on_real_speech`
+# below, gated on that test first asserting at least one real segment exists,
+# so the loop body is guaranteed to actually execute wherever it runs.
 
 
 def _say_available() -> bool:
@@ -216,6 +217,11 @@ def test_word_timestamps_are_plausible_on_real_speech(tmp_path):
     starts = [w.start for w in all_words]
     assert starts == sorted(starts), "word start times must be non-decreasing across the transcript"
 
-    segments_no_words, _ = model.transcribe(str(audio), language="en", word_timestamps=False)
+    segments_no_words = list(model.transcribe(str(audio), language="en", word_timestamps=False)[0])
+    # This is the live coverage for "words is absent unless requested": it
+    # only proves anything if at least one segment actually exists to check,
+    # which real speech (unlike the synthetic tone elsewhere in this file)
+    # reliably produces.
+    assert len(segments_no_words) >= 1, "real speech should produce at least one segment here too"
     for seg in segments_no_words:
         assert seg.words is None
