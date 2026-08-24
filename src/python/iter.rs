@@ -56,9 +56,24 @@ impl SegmentIterator {
             let words = slf.word_timestamps;
 
             // Release the GIL for the whole decode: it is the slow part.
-            let raw = py
-                .detach(|| asr.transcribe(&window.samples, Some(&language), words))
-                .map_err(to_pyerr)?;
+            let raw = py.detach(|| asr.transcribe(&window.samples, Some(&language), words));
+
+            let raw = match raw {
+                Ok(raw) => raw,
+                Err(e) => {
+                    // The window was already popped above so it could be
+                    // moved into the decode closure; if decoding it failed,
+                    // put it back at the front instead of letting it stay
+                    // consumed. Otherwise a caller that catches this
+                    // `RuntimeError` (Python generators are resumable -- a
+                    // `try`/`except` around `next(segments)` is a completely
+                    // reasonable thing to do) and keeps iterating would
+                    // silently skip 30 s of audio with no indication
+                    // anything was lost.
+                    slf.windows.push_front(window);
+                    return Err(to_pyerr(e));
+                }
+            };
 
             let mut next_id = slf.next_id;
             let stitched = crate::stitch::stitch(&window, raw, &mut next_id);
