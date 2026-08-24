@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 /// Files CTranslate2 needs. `model.bin` and `config.json` are mandatory; the
 /// rest are fetched when present, since repos differ in tokenizer layout.
 const REQUIRED: &[&str] = &["model.bin", "config.json"];
+/// A repo must ship at least one of these -- `ct2rs`'s HF tokenizer loader
+/// needs a `tokenizer.json`, or a `vocabulary.json`/`vocabulary.txt` it can
+/// build one from. `preprocessor_config.json` is not in this list: it is
+/// truly optional, since `ensure_preprocessor_config` synthesizes it when
+/// absent (see that function's docs).
+const TOKENIZER_FILES: &[&str] = &["tokenizer.json", "vocabulary.json", "vocabulary.txt"];
 const OPTIONAL: &[&str] = &[
     "tokenizer.json",
     "vocabulary.json",
@@ -105,6 +111,24 @@ fn ensure_preprocessor_config(dir: &Path, identity: &str) -> Result<()> {
     } else {
         MEL_BINS_DEFAULT
     };
+
+    // This writes into the model directory, which for `ModelRef::Local` is a
+    // directory the *user* owns (not our download cache), and the choice of
+    // `feature_size` is a heuristic guess from a name, not a certainty. If
+    // that guess is wrong -- e.g. a locally-converted 128-bin (large-v3)
+    // model living in a directory whose path never mentions "large-v3" --
+    // the wrong value gets persisted once and, because synthesis never
+    // overwrites an existing file, silently stays wrong on every future load
+    // until the user deletes it by hand. Warning loudly at the point of
+    // writing, naming both the chosen value and the exact path, is the only
+    // way that mistake is ever surfaced.
+    tracing::warn!(
+        "synthesizing {path} (feature_size={feature_size}) for model {identity:?}: ct2rs \
+         requires this file and it was missing; feature_size is guessed from the model name/path \
+         (\"large-v3\" => 128, otherwise 80) and, once written, will not be regenerated -- delete \
+         {path} by hand and re-run if this guess is wrong for your model",
+        path = path.display(),
+    );
 
     let json = format!(
         r#"{{
@@ -206,6 +230,21 @@ pub fn validate_dir(name: &str, dir: &Path) -> Result<()> {
         });
     }
 
+    // A repo shipping none of these passes every other check here and then
+    // dies inside CTranslate2's C++ tokenizer loader with exactly the opaque
+    // native error this function exists to prevent -- so require at least
+    // one up front instead.
+    if !TOKENIZER_FILES.iter().any(|f| dir.join(f).is_file()) {
+        return Err(Error::ModelNotFound {
+            name: name.to_string(),
+            path: dir.to_path_buf(),
+            message: format!(
+                "missing a tokenizer file: need at least one of {}",
+                TOKENIZER_FILES.join(", ")
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -225,8 +264,41 @@ mod tests {
         let d = temp_dir("ok");
         std::fs::write(d.join("model.bin"), b"x").unwrap();
         std::fs::write(d.join("config.json"), b"{}").unwrap();
+        std::fs::write(d.join("tokenizer.json"), b"{}").unwrap();
 
         validate_dir("tiny", &d).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_a_directory_without_any_tokenizer_file() {
+        let d = temp_dir("no_tokenizer");
+        std::fs::write(d.join("model.bin"), b"x").unwrap();
+        std::fs::write(d.join("config.json"), b"{}").unwrap();
+        // Deliberately no tokenizer.json / vocabulary.json / vocabulary.txt.
+
+        let err = validate_dir("tiny", &d).unwrap_err();
+
+        match err {
+            Error::ModelNotFound { message, .. } => assert!(
+                message.contains("tokenizer"),
+                "the message must explain the missing tokenizer file, got: {message}"
+            ),
+            other => panic!("expected ModelNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_any_single_tokenizer_variant() {
+        for variant in TOKENIZER_FILES {
+            let d = temp_dir(&format!("tokenizer_variant_{variant}"));
+            std::fs::write(d.join("model.bin"), b"x").unwrap();
+            std::fs::write(d.join("config.json"), b"{}").unwrap();
+            std::fs::write(d.join(variant), b"x").unwrap();
+
+            validate_dir("tiny", &d).unwrap_or_else(|e| {
+                panic!("{variant} alone should satisfy the tokenizer requirement, got: {e}")
+            });
+        }
     }
 
     #[test]
@@ -254,6 +326,7 @@ mod tests {
         let d = temp_dir("local");
         std::fs::write(d.join("model.bin"), b"x").unwrap();
         std::fs::write(d.join("config.json"), b"{}").unwrap();
+        std::fs::write(d.join("tokenizer.json"), b"{}").unwrap();
 
         let got = ensure_model(d.to_str().unwrap(), &FetchOptions::default()).unwrap();
 
