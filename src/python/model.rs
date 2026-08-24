@@ -10,6 +10,25 @@ use pyo3::types::PyDict;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// A loaded Whisper model, ready to transcribe audio files.
+///
+/// Loads (downloading if needed) a CTranslate2-converted Whisper checkpoint
+/// and exposes [`transcribe`][WhisperModel::transcribe]. `model` may be a
+/// short alias (`"tiny"`, `"base"`, `"small"`, `"medium"`, `"large-v3"`, ...),
+/// an explicit `org/repo` on the Hugging Face Hub, or a local directory
+/// already in CTranslate2 format (see `whisper_rs.convert.convert_model` to
+/// produce one from an arbitrary Hugging Face Whisper checkpoint).
+///
+/// # Example
+/// ```python
+/// import whisper_rs
+///
+/// model = whisper_rs.WhisperModel("tiny")
+/// segments, info = model.transcribe("audio.wav")
+/// print(info.duration, info.duration_after_vad)
+/// for segment in segments:
+///     print(segment.start, segment.end, segment.text)
+/// ```
 #[pyclass]
 pub struct WhisperModel {
     asr: Arc<Ct2Asr>,
@@ -81,6 +100,41 @@ impl WhisperModel {
         self.model_dir.display().to_string()
     }
 
+    /// Transcribe an audio file.
+    ///
+    /// Returns `(segments, info)`: `segments` is a lazily-decoded iterator
+    /// (nothing is decoded until it is iterated) and `info` is a
+    /// [`TranscriptionInfo`] that is already fully populated by the time
+    /// this call returns.
+    ///
+    /// # Whole-file, whole-language-detection eagerness
+    ///
+    /// Loading, VAD, and windowing the *entire* audio file happen eagerly,
+    /// synchronously, inside this call (the whole decoded file is held in
+    /// memory as `f32` samples -- there is no streaming/chunked-from-disk
+    /// path in v1). If `language` is left as `None`, this call *also* runs
+    /// one extra full 30 s decode up front to auto-detect the language,
+    /// before any segment has been produced -- so auto-detection costs a
+    /// second full decode of the first window on top of that window's
+    /// ordinary transcription decode. Passing `language=` explicitly (e.g.
+    /// `"en"`) skips that detection decode entirely.
+    ///
+    /// # `vad_parameters["threshold"]` / `["neg_threshold"]`
+    ///
+    /// These two keys are only meaningful when the crate is compiled with
+    /// the `silero-vad` feature. The default VAD backend (WebRTC) emits only
+    /// 0.0/1.0 speech probabilities, so the hysteresis band between
+    /// `threshold` and `neg_threshold` degenerates to a no-op on the default
+    /// build; a warning is logged (via `tracing`) when either is set in that
+    /// configuration. They are still accepted (not rejected) because they
+    /// are real, effective parameters under `silero-vad`.
+    ///
+    /// # `info.language_probability`
+    ///
+    /// Always `None` in v1: this API never fabricates a confidence score it
+    /// cannot actually compute (there is no language-detection API in
+    /// `ct2rs`; the code is recovered from Whisper's own leading `<|xx|>`
+    /// token).
     #[pyo3(signature = (
         audio,
         *,
@@ -198,8 +252,14 @@ fn vad_params_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<VadParams>
     for (key, value) in dict.iter() {
         let key: String = key.extract()?;
         match key.as_str() {
-            "threshold" => params.threshold = value.extract()?,
-            "neg_threshold" => params.neg_threshold = value.extract()?,
+            "threshold" => {
+                params.threshold = value.extract()?;
+                warn_if_inert_on_default_backend("threshold");
+            }
+            "neg_threshold" => {
+                params.neg_threshold = value.extract()?;
+                warn_if_inert_on_default_backend("neg_threshold");
+            }
             "min_speech_duration_ms" => params.min_speech_ms = value.extract()?,
             "min_silence_duration_ms" => params.min_silence_ms = value.extract()?,
             "speech_pad_ms" => params.speech_pad_ms = value.extract()?,
@@ -214,3 +274,28 @@ fn vad_params_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<VadParams>
 
     Ok(params)
 }
+
+/// Warn that `key` is accepted but has no effect on the compiled-in default
+/// VAD backend.
+///
+/// The default backend is WebRTC (see `vad::WebRtcBackend`'s docs), which
+/// emits only 0.0/1.0 probabilities -- so the two-threshold hysteresis band
+/// `threshold`/`neg_threshold` select between degenerates: 1.0 always opens
+/// a region and 0.0 always closes it regardless of where either threshold is
+/// set. Both keys are provably inert unless the crate is built with the
+/// `silero-vad` feature, which supplies a graded backend where they matter.
+/// The spec forbids silently accepting and ignoring an argument, so this
+/// warns (it does not error: the key is still meaningful under that
+/// feature, and the default build must keep accepting it for API
+/// compatibility with callers who build both ways).
+#[cfg(not(feature = "silero-vad"))]
+fn warn_if_inert_on_default_backend(key: &str) {
+    tracing::warn!(
+        "vad_parameters[{key:?}] has no effect: the default VAD backend (WebRTC) only emits \
+         0.0/1.0 probabilities, so {key} degenerates to a no-op. Build with the \
+         `silero-vad` feature for a graded backend where this parameter matters."
+    );
+}
+
+#[cfg(feature = "silero-vad")]
+fn warn_if_inert_on_default_backend(_key: &str) {}
