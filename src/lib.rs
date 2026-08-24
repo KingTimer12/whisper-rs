@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod chunk;
 mod error;
 mod types;
 mod vad;
