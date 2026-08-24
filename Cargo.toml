@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pyo3 = { version = "0.28.3", features = ["abi3-py38"] }
 ct2rs = { version = "0.10", features = ["whisper"] }
-wavekat-vad = { version = "0.1.16", features = ["silero"] }
+wavekat-vad = { version = "0.1.16" }
 symphonia = { version = "0.6", features = ["mp3", "isomp4", "aac", "flac", "vorbis", "wav", "pcm"] }
 rubato = "5.0"
 hf-hub = { version = "1.0", features = ["blocking"], default-features = false }
@@ -23,3 +23,4 @@ hound = "3.5"
 
 [features]
 extension-module = ["pyo3/extension-module"]
+silero-vad = ["wavekat-vad/silero"]

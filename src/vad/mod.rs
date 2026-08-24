@@ -62,6 +62,84 @@ pub fn detect(
     Ok((probs, regions))
 }
 
+fn f32_to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+}
+
+/// WebRTC VAD via wavekat-vad. Binary output (0.0/1.0), no model file, no
+/// ONNX runtime — this is the default backend the pipeline should use.
+///
+/// Uses the crate's default 30 ms frame duration, which at 16 kHz is 480
+/// samples.
+///
+/// Caveat: because this backend returns only 0.0 or 1.0, the two-threshold
+/// hysteresis band in `regions_from_probs` (`threshold` / `neg_threshold`)
+/// degenerates — 1.0 always opens a region and 0.0 always closes it, so
+/// nothing ever lands strictly between the two thresholds. Region extraction
+/// is still correct (`min_speech_ms`, `min_silence_ms`, `speech_pad_ms` all
+/// still apply), but the anti-chop benefit hysteresis gives graded backends
+/// like Silero is inactive here.
+pub struct WebRtcBackend {
+    inner: wavekat_vad::backends::webrtc::WebRtcVad,
+    frame: usize,
+}
+
+impl WebRtcBackend {
+    pub fn new() -> Result<Self> {
+        use wavekat_vad::backends::webrtc::WebRtcVadMode;
+        use wavekat_vad::VoiceActivityDetector;
+
+        let inner =
+            wavekat_vad::backends::webrtc::WebRtcVad::new(crate::types::SAMPLE_RATE as u32, WebRtcVadMode::Quality)
+                .map_err(|e| crate::error::Error::Vad(e.to_string()))?;
+        let frame = inner.capabilities().frame_size;
+        Ok(Self { inner, frame })
+    }
+}
+
+impl Vad for WebRtcBackend {
+    fn probabilities(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
+        use wavekat_vad::VoiceActivityDetector;
+
+        let mut out = Vec::with_capacity(samples.len() / self.frame + 1);
+        for chunk in samples.chunks(self.frame) {
+            // The backend needs a full frame; pad the tail with silence.
+            let frame_i16: Vec<i16> = if chunk.len() == self.frame {
+                chunk.iter().copied().map(f32_to_i16).collect()
+            } else {
+                let mut padded = chunk.to_vec();
+                padded.resize(self.frame, 0.0);
+                padded.iter().copied().map(f32_to_i16).collect()
+            };
+            let p = self
+                .inner
+                .process(&frame_i16, crate::types::SAMPLE_RATE as u32)
+                .map_err(|e| crate::error::Error::Vad(e.to_string()))?;
+            out.push(p);
+        }
+        Ok(out)
+    }
+
+    fn frame_samples(&self) -> usize {
+        self.frame
+    }
+}
+
+/// Returns the pipeline's default VAD backend (WebRTC).
+///
+/// Silero is not the default: linking `ort`'s statically-linked ONNX
+/// Runtime into the same binary as `ct2rs`'s statically-linked CTranslate2
+/// causes a protobuf ODR collision that SIGBUSes the whole process on
+/// `SileroVad::new()` (observed under lldb: crash inside
+/// `google::protobuf::MessageLite::InitializationErrorString` while onnxruntime
+/// parses the model). Keeping `silero-vad` off by default means `ort` is not
+/// linked at all in a default build, removing the collision by construction.
+/// See `SileroBackend` below for the full story and enable the `silero-vad`
+/// feature to opt back in.
+pub fn default_backend() -> Result<Box<dyn Vad>> {
+    Ok(Box::new(WebRtcBackend::new()?))
+}
+
 /// Silero VAD via wavekat-vad. 16 kHz only.
 ///
 /// Note: `wavekat_vad::backends::silero::SileroVad::process` expects `&[i16]`
@@ -69,11 +147,29 @@ pub fn detect(
 /// size exactly (512 samples at 16 kHz) or it returns `VadError::InvalidFrameSize`.
 /// So this wrapper converts f32 samples in [-1.0, 1.0] to i16 and pads the
 /// trailing partial frame with silence before calling `process`.
+///
+/// Gated behind the `silero-vad` feature (off by default): enabling it links
+/// `ort`'s statically-linked ONNX Runtime into the same binary as `ct2rs`'s
+/// statically-linked CTranslate2. In this repo's build environment that
+/// causes a protobuf ODR collision — two independently statically-linked C++
+/// runtimes each bundling their own protobuf — which SIGBUSes the whole
+/// process during `SileroVad::new()` (session/model load), confirmed under
+/// lldb: the crash is inside `google::protobuf::MessageLite::InitializationErrorString`
+/// while onnxruntime's statically-linked protobuf parses the embedded model.
+/// Switching `ort` to `load-dynamic` does not fix this on its own: it needs a
+/// local onnxruntime dylib whose version matches `ort` 2.0.0-rc.13's ABI
+/// exactly (tested against system onnxruntime 1.25.1 and 1.26.0, both
+/// rejected with `BadVersion`). Until a toolchain fix is found (e.g. building
+/// CTranslate2 and onnxruntime with a shared/compatible C++ runtime, or
+/// sourcing an ABI-matching onnxruntime dylib for `load-dynamic`), do not
+/// wire this backend into the default pipeline.
+#[cfg(feature = "silero-vad")]
 pub struct SileroBackend {
     inner: wavekat_vad::backends::silero::SileroVad,
     frame: usize,
 }
 
+#[cfg(feature = "silero-vad")]
 impl SileroBackend {
     pub fn new() -> Result<Self> {
         let inner = wavekat_vad::backends::silero::SileroVad::new(crate::types::SAMPLE_RATE as u32)
@@ -83,10 +179,7 @@ impl SileroBackend {
     }
 }
 
-fn f32_to_i16(sample: f32) -> i16 {
-    (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-}
-
+#[cfg(feature = "silero-vad")]
 impl Vad for SileroBackend {
     fn probabilities(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
         use wavekat_vad::VoiceActivityDetector;
@@ -177,6 +270,41 @@ mod tests {
         assert_eq!(probs.len(), 4, "frame size must come from the backend");
     }
 
+    #[test]
+    fn webrtc_backend_produces_one_probability_per_frame() {
+        let mut vad = match WebRtcBackend::new() {
+            Ok(v) => v,
+            Err(e) => panic!("WebRtcBackend::new failed: {e}"),
+        };
+        let frame = vad.frame_samples();
+        let samples = vec![0.0f32; frame * 3 + frame / 2]; // includes a trailing partial frame
+
+        let probs = vad.probabilities(&samples).unwrap();
+
+        assert_eq!(probs.len(), 4, "one probability per frame, including the padded tail");
+        assert!(
+            probs.iter().all(|p| (0.0..=1.0).contains(p)),
+            "probabilities must be in [0, 1], got {probs:?}"
+        );
+        assert!(
+            probs.iter().all(|&p| p < 0.5),
+            "pure silence must not be detected as speech, got {probs:?}"
+        );
+    }
+
+    #[test]
+    fn default_backend_produces_one_probability_per_frame() {
+        let mut vad = default_backend().unwrap();
+        let frame = vad.frame_samples();
+        assert!(frame > 0, "backend must report a non-zero frame size");
+
+        let samples = vec![0.0f32; frame * 4];
+        let probs = vad.probabilities(&samples).unwrap();
+
+        assert_eq!(probs.len(), 4, "one probability per frame for a known input length");
+    }
+
+    #[cfg(feature = "silero-vad")]
     #[test]
     fn silero_backend_produces_one_probability_per_frame() {
         let mut vad = match SileroBackend::new() {
