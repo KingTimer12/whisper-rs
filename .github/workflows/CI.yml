@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: cargo test and clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+      # The ignored tests are excluded: they download models.
+      - run: cargo test --all-targets
+      - run: cargo clippy --all-targets -- -D warnings
+
+  wheel:
+    name: build wheel and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+      - run: pip install maturin pytest
+      - run: maturin build --release --out dist
+      - run: pip install --find-links dist whisper-rs
+      # Only the tests that need no model.
+      - run: pytest tests/python -v -m "not model"
+
+  model-tests:
+    name: model-backed tests
+    runs-on: ubuntu-latest
+    # Manual only: these download the tiny model.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-tiny-${{ runner.os }}
+      - run: pip install maturin pytest
+      - run: maturin develop --release
+      - run: pytest tests/python -v -m model
+      - run: cargo test --test e2e -- --ignored

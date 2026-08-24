@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "whisper-rs"
+requires-python = ">=3.8"
+description = "Whisper transcription with a Rust core: CTranslate2 inference, VAD-driven windowing"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+convert = ["ctranslate2", "transformers"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "whisper_rs.whisper_rs"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+markers = ["model: needs the tiny Whisper model (downloads on first run)"]
