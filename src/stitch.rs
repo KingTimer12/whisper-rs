@@ -23,17 +23,27 @@ pub fn stitch(window: &Window, segs: Vec<Seg>, next_id: &mut u32) -> Vec<Seg> {
             continue;
         }
 
-        let words = seg.words.map(|ws| {
-            ws.into_iter()
-                .filter(|w| w.start < real)
-                .map(|w| crate::types::Word {
-                    start: offset + w.start,
-                    end: (offset + w.end).min(limit),
-                    text: w.text,
-                    probability: w.probability,
-                })
-                .collect()
-        });
+        let words = seg
+            .words
+            .map(|ws| {
+                ws.into_iter()
+                    .filter(|w| w.start < real)
+                    .map(|w| crate::types::Word {
+                        start: offset + w.start,
+                        end: (offset + w.end).min(limit),
+                        text: w.text,
+                        probability: w.probability,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            // If every word started inside the padding, `words` would become
+            // `Some(vec![])` here instead of `None`. That's ambiguous with
+            // "word timestamps were requested and none survived stitching"
+            // versus the actual sentinel callers rely on
+            // (`seg.words is None` means "word_timestamps was not
+            // requested"), so collapse the all-filtered-out case back to
+            // `None`.
+            .filter(|ws| !ws.is_empty());
 
         out.push(Seg {
             id: *next_id,
@@ -140,6 +150,35 @@ mod tests {
         let out = stitch(&window(0.0, 30.0), vec![], &mut id);
         assert!(out.is_empty());
         assert_eq!(id, 5, "the counter must not move");
+    }
+
+    #[test]
+    fn words_all_filtered_out_by_padding_become_none_not_an_empty_list() {
+        // Real window audio ends at 10 s; the only word starts in the padding.
+        let w = window(0.0, 10.0);
+        let mut id = 0;
+        let segs = vec![Seg {
+            id: 0,
+            start: 1.0,
+            end: 9.5,
+            text: "real text".into(),
+            words: Some(vec![Word {
+                start: 12.0,
+                end: 13.0,
+                text: "hallucinated".into(),
+                probability: 0.5,
+            }]),
+        }];
+
+        let out = stitch(&w, segs, &mut id);
+
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].words.is_none(),
+            "an all-filtered word list must collapse to None, not Some(vec![]), \
+             or callers cannot distinguish it from word_timestamps=False; got {:?}",
+            out[0].words
+        );
     }
 
     #[test]
