@@ -79,10 +79,51 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
     loop {
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
-            // End of stream.
+            // End of stream: symphonia 0.6 signals this with `Ok(None)`, not
+            // an I/O error (see the module docstring), so this is the only
+            // place a clean end-of-stream is recognised.
             Ok(None) => break,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            // A genuine I/O error reading the container (truncated file,
+            // disk error, ...) used to be symphonia 0.5's EOF signal; in 0.6
+            // clean end of stream is *exclusively* `Ok(None)` (see the
+            // module docstring), so any `IoError` reaching this point is a
+            // real failure, not an alternate EOF spelling -- including
+            // `UnexpectedEof`, which in practice is exactly what a
+            // truncated/corrupt read surfaces as (confirmed empirically: a
+            // WAV chopped off mid-frame produces `UnexpectedEof` here, not a
+            // clean `Ok(None)`). Treating it as end-of-stream is precisely
+            // the bug this review flagged -- it must not be swallowed, or a
+            // mid-file read failure silently truncates the transcript
+            // instead of failing loudly.
+            Err(symphonia::core::errors::Error::IoError(e)) => {
+                return Err(Error::AudioRead {
+                    path: path.to_path_buf(),
+                    message: e.to_string(),
+                });
+            }
+            // `next_packet`'s `ResetRequired` means the *track list* changed
+            // (chained Ogg, a container splicing in a new stream, ...) and
+            // per symphonia's own contract on `FormatReader::next_packet`,
+            // "the track list must be re-examined and all `Decoder`s
+            // re-created" -- a bigger operation than `Decoder::reset` (which
+            // only covers the decoder-level reset `AudioDecoder::decode`
+            // documents for in-place parameter changes). Silently `break`ing
+            // here drops everything after the reset with no error, which is
+            // exactly the failure mode this review flagged. Correctly
+            // handling it would mean re-deriving the track, codec params,
+            // and sample rate this function fixes once before the loop, for
+            // a stream shape (multiple logical bitstreams concatenated in
+            // one file) this crate does not otherwise claim to support, so
+            // the safer choice is to fail loudly rather than guess: return
+            // an error naming what happened instead of continuing with a
+            // decoder or track assumptions that may no longer be valid.
+            Err(symphonia::core::errors::Error::ResetRequired) => {
+                return Err(Error::AudioRead {
+                    path: path.to_path_buf(),
+                    message: "the stream requires a reset (its track list changed mid-file,                               e.g. a chained/concatenated container) -- unsupported"
+                        .into(),
+                });
+            }
             Err(e) => {
                 return Err(Error::AudioRead {
                     path: path.to_path_buf(),
@@ -105,8 +146,20 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
                     out.push(sum / channels as f32);
                 }
             }
-            // A corrupt packet mid-file should not lose the whole file.
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+            // A corrupt packet mid-file must not lose the whole file, but it
+            // also must not silently drop that packet's samples: doing so
+            // shifts every later sample earlier by the packet's duration,
+            // so every timestamp for the rest of the file is wrong. Push
+            // silence for exactly the packet's declared duration instead,
+            // keeping the timeline aligned, and warn so this is visible.
+            Err(symphonia::core::errors::Error::DecodeError(msg)) => {
+                tracing::warn!(
+                    "corrupt packet in {}: {msg}; inserting {} samples of silence to keep the timeline aligned",
+                    path.display(),
+                    packet.dur.get()
+                );
+                out.resize(out.len() + packet.dur.get() as usize, 0.0);
+            }
             Err(e) => {
                 return Err(Error::AudioRead {
                     path: path.to_path_buf(),
@@ -153,6 +206,40 @@ mod tests {
             writer.write_sample(sample).unwrap();
         }
         writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn a_wav_truncated_mid_data_is_not_silently_treated_as_a_success_shift() {
+        // Write a valid WAV, then chop it off partway through the data chunk
+        // so the RIFF header's declared byte count no longer matches the
+        // bytes actually on disk. Before this fix, any IoError on
+        // `next_packet` (which is exactly what a truncated read produces)
+        // was unconditionally treated as a clean end of stream and the
+        // function returned `Ok` with whatever samples had been decoded so
+        // far -- a corrupt/truncated file looked identical to a short valid
+        // one. This asserts the fix: a truncation deep enough to break the
+        // container framing must surface as a real, typed error, not a
+        // quiet partial success.
+        let dir = std::env::temp_dir().join("whisper_rs_t2_truncated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.wav");
+        write_sine_wav_i16(&good, 16_000, 2.0);
+
+        let bytes = std::fs::read(&good).unwrap();
+        let truncated = dir.join("truncated.wav");
+        // Cut it off mid-header/mid-frame (not on a sample boundary), which
+        // is what turns a "just fewer packets" truncation into a real
+        // corrupt-container read failure rather than a clean short EOF.
+        std::fs::write(&truncated, &bytes[..bytes.len() / 2 + 1]).unwrap();
+
+        let result = decode_file(&truncated);
+
+        // This must not silently succeed with a truncated/shifted sample
+        // count and no error at all.
+        assert!(
+            result.is_err(),
+            "a mid-file truncation must surface as an error, not a quiet partial decode"
+        );
     }
 
     #[test]
