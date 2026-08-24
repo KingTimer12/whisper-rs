@@ -5,11 +5,17 @@ use crate::error::{Error, Result};
 use crate::types::{Seg, Word};
 use std::path::Path;
 
-/// Whisper mel frames per second used by ct2rs's frame-indexed options
-/// (30 s of audio maps to 1500 frames, i.e. 50 frames/s). ct2rs 0.10 has no
-/// seconds-based `max_initial_timestamp` option, only a frame index, so this
-/// is used to convert `Ct2Config::max_initial_timestamp` (seconds) into the
-/// `max_initial_timestamp_index` ct2rs actually takes.
+/// Whisper mel frames per second used by ct2rs's frame-indexed options.
+///
+/// Whisper emits timestamp tokens at 0.02 s granularity, i.e. 50 per second
+/// (30 s of audio maps to 1500 mel frames total). ct2rs 0.10 has no
+/// seconds-based `max_initial_timestamp` option, only a frame index
+/// (`max_initial_timestamp_index`, default 50), so this constant converts
+/// `Ct2Config::max_initial_timestamp` (seconds) into that index. The default
+/// case round-trips exactly (`1.0 s * 50.0 == 50`, matching ct2rs's own
+/// default), which corroborates the ratio, but the mapping for other values
+/// is inferred from CTranslate2's mel-frame timing rather than a documented
+/// ct2rs guarantee.
 const FRAMES_PER_SECOND: f32 = 50.0;
 
 #[derive(Debug, Clone)]
@@ -54,20 +60,31 @@ pub struct Ct2Asr {
     options: ct2rs::WhisperOptions,
 }
 
+/// Build the ct2rs `Config` from a `Ct2Config`.
+///
+/// ct2rs/CTranslate2 has no independent "worker count" knob: replicas are
+/// determined by how many entries `device_indices` has (CTranslate2's
+/// `ReplicaPool` loads one model replica per entry, see
+/// `models/model.cc`'s `device_indices.size() * num_replicas_per_device`
+/// reservation). Repeating the same device index `num_workers` times is the
+/// documented way to run `num_workers` concurrent replicas on one device, so
+/// `cfg.num_workers` maps onto the *length* of `device_indices` rather than
+/// onto a dedicated field. `num_workers` is clamped to at least 1 so a
+/// misconfigured `0` still produces a working single-replica config instead
+/// of an empty (rejected) device list.
+fn build_config(cfg: &Ct2Config) -> Result<ct2rs::Config> {
+    Ok(ct2rs::Config {
+        device: parse_device(&cfg.device)?,
+        compute_type: parse_compute_type(&cfg.compute_type)?,
+        device_indices: vec![cfg.device_index; cfg.num_workers.max(1)],
+        num_threads_per_replica: cfg.cpu_threads,
+        ..Default::default()
+    })
+}
+
 impl Ct2Asr {
     pub fn new(model_dir: &Path, cfg: Ct2Config) -> Result<Self> {
-        // NOTE: ct2rs 0.10's `Config` has no per-replica worker-count knob
-        // independent of `device_indices` (see `num_replicas()`, which is
-        // derived from the device/tensor-parallel setup, not settable
-        // directly). `cfg.num_workers` therefore has no equivalent here and
-        // is intentionally not read below.
-        let config = ct2rs::Config {
-            device: parse_device(&cfg.device)?,
-            compute_type: parse_compute_type(&cfg.compute_type)?,
-            device_indices: vec![cfg.device_index],
-            num_threads_per_replica: cfg.cpu_threads,
-            ..Default::default()
-        };
+        let config = build_config(&cfg)?;
 
         let inner =
             ct2rs::Whisper::new(model_dir, config).map_err(|e| Error::Ct2(e.to_string()))?;
@@ -169,5 +186,32 @@ impl Asr for Ct2Asr {
             .iter()
             .find_map(|line| super::parse_language_token(line))
             .unwrap_or_else(|| "unknown".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn num_workers_becomes_that_many_device_indices() {
+        let cfg = Ct2Config {
+            num_workers: 3,
+            device_index: 0,
+            ..Default::default()
+        };
+        let config = build_config(&cfg).unwrap();
+        assert_eq!(config.device_indices, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn zero_num_workers_still_yields_one_device_index() {
+        let cfg = Ct2Config {
+            num_workers: 0,
+            device_index: 2,
+            ..Default::default()
+        };
+        let config = build_config(&cfg).unwrap();
+        assert_eq!(config.device_indices, vec![2]);
     }
 }
