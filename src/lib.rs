@@ -4,12 +4,19 @@ mod chunk;
 mod error;
 mod models;
 mod pipeline;
+mod python;
 mod stitch;
 mod types;
 mod vad;
 
 use pyo3::prelude::*;
 
-/// Placeholder module. Task 10 replaces this with the real classes.
 #[pymodule]
-mod whisper_rs {}
+fn whisper_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<python::model::WhisperModel>()?;
+    m.add_class::<python::iter::SegmentIterator>()?;
+    m.add_class::<python::segment::Segment>()?;
+    m.add_class::<python::segment::Word>()?;
+    m.add_class::<python::segment::TranscriptionInfo>()?;
+    Ok(())
+}
