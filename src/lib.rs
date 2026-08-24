@@ -2,6 +2,7 @@ mod asr;
 mod audio;
 mod error;
 mod types;
+mod vad;
 
 use pyo3::prelude::*;
 
