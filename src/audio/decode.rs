@@ -127,3 +127,59 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
         sample_rate,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a mono 16-bit integer PCM WAV of a 440 Hz sine at `rate` Hz for `secs` seconds.
+    ///
+    /// Real-world mp3/wav files are integer PCM, not float, so this exercises the
+    /// symphonia sample-format conversion path that the brief's float-only fixtures
+    /// (see `audio::tests::write_sine_wav`) never touch.
+    fn write_sine_wav_i16(path: &std::path::Path, rate: u32, secs: f32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        let frames = (rate as f32 * secs) as usize;
+        for i in 0..frames {
+            let t = i as f32 / rate as f32;
+            let v = (t * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+            let sample = (v * i16::MAX as f32) as i16;
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn decodes_16bit_integer_pcm_wav_normalised() {
+        let dir = std::env::temp_dir().join("whisper_rs_t2_pcm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mono16k_i16.wav");
+        write_sine_wav_i16(&path, 16_000, 1.0);
+
+        let decoded = decode_file(&path).unwrap();
+
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert!(
+            (decoded.samples.len() as i64 - 16_000).abs() <= 1,
+            "expected ~16000 samples, got {}",
+            decoded.samples.len()
+        );
+        assert!(
+            decoded.samples.iter().all(|s| s.abs() <= 1.0),
+            "integer PCM must be normalised to [-1, 1], got a sample outside that range"
+        );
+
+        // A 0.5-amplitude 16-bit sine must decode to a clearly non-silent peak. This is
+        // what catches a missing or wrong scale factor: a bug here shows up as either
+        // near-zero output (never scaled up from ~1/32768) or values in the thousands
+        // (never scaled down at all).
+        let peak = decoded.samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(peak > 0.3, "expected a clearly non-silent peak, got {peak}");
+    }
+}

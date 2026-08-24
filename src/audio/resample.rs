@@ -33,27 +33,66 @@ pub fn to_16k(samples: Vec<f32>, from_rate: u32) -> Result<Vec<f32>> {
     let mut resampler = Async::<f32>::new_sinc(ratio, 2.0, &params, chunk, 1, FixedAsync::Input)
         .map_err(|e| Error::Resample(e.to_string()))?;
 
-    let mut out: Vec<f32> = Vec::with_capacity((samples.len() as f64 * ratio) as usize + chunk);
-    let mut pos = 0usize;
+    let input_len = samples.len();
+    let input = SequentialSlice::new(&samples, 1, input_len).map_err(|e| Error::Resample(e.to_string()))?;
 
-    while pos < samples.len() {
-        let end = (pos + chunk).min(samples.len());
-        let mut block = samples[pos..end].to_vec();
-        // The final block must be padded to the fixed chunk size.
-        block.resize(chunk, 0.0);
+    // `process_all` resamples the whole clip in one call: it internally chunks the input,
+    // pads and flushes the filter as needed, and trims the resampler's startup delay itself.
+    // This is correct for any input length (including inputs shorter than one chunk) and for
+    // any ratio (upsampling or downsampling), unlike manually chunking + padding + trimming by
+    // a naive `round(len * ratio)` estimate, which ignores the filter's group delay.
+    let produced = resampler
+        .process_all(&input, input_len, None)
+        .map_err(|e| Error::Resample(e.to_string()))?;
 
-        let input = SequentialSlice::new(&block, 1, chunk).map_err(|e| Error::Resample(e.to_string()))?;
-        let produced = resampler
-            .process(&input, None)
-            .map_err(|e| Error::Resample(e.to_string()))?;
-        out.extend_from_slice(&produced.take_data());
+    Ok(produced.take_data())
+}
 
-        pos = end;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sine(rate: u32, secs: f32) -> Vec<f32> {
+        let frames = (rate as f32 * secs) as usize;
+        (0..frames)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.5
+            })
+            .collect()
     }
 
-    // Trim the tail produced by zero padding the last block.
-    let expected = (samples.len() as f64 * ratio).round() as usize;
-    out.truncate(expected.min(out.len()));
+    /// Upsampling (8 kHz -> 16 kHz) must roughly double the sample count, not
+    /// under-crop the tail the way a naive `round(len * ratio)` truncation can
+    /// for short/padded inputs at ratio > 1.
+    #[test]
+    fn upsamples_8k_to_16k() {
+        let samples = sine(8_000, 1.0);
+        let out = to_16k(samples.clone(), 8_000).unwrap();
 
-    Ok(out)
+        let expected = samples.len() * 2;
+        let diff = (out.len() as i64 - expected as i64).abs();
+        assert!(diff < (expected as i64 / 100).max(2), "expected ~{expected}, got {}", out.len());
+    }
+
+    /// An input shorter than one internal processing chunk (1024 frames) must
+    /// still resample to a length proportional to the ratio, without panicking
+    /// or degenerating to an empty/garbage buffer.
+    #[test]
+    fn resamples_input_shorter_than_one_chunk() {
+        let from_rate = 44_100u32;
+        let samples: Vec<f32> = (0..500)
+            .map(|i| {
+                let t = i as f32 / from_rate as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.5
+            })
+            .collect();
+
+        let out = to_16k(samples.clone(), from_rate).unwrap();
+
+        let ratio = SAMPLE_RATE as f64 / from_rate as f64;
+        let expected = (samples.len() as f64 * ratio).round() as i64;
+        let diff = (out.len() as i64 - expected).abs();
+        assert!(diff <= 5, "expected ~{expected}, got {}", out.len());
+    }
 }
