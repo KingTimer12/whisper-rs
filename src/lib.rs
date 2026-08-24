@@ -3,6 +3,7 @@ mod audio;
 mod chunk;
 mod error;
 mod models;
+mod pipeline;
 mod stitch;
 mod types;
 mod vad;
