@@ -2,6 +2,7 @@ mod asr;
 mod audio;
 mod chunk;
 mod error;
+mod models;
 mod stitch;
 mod types;
 mod vad;
