@@ -93,6 +93,16 @@ pub fn build_window(samples: &[f32], range: (usize, usize)) -> Window {
 
     let mut buf = Vec::with_capacity(WINDOW_SAMPLES);
     buf.extend_from_slice(&samples[start..end]);
+    // `buf.truncate` below is defence against a broken `plan_windows`
+    // invariant (every window range it produces must fit within
+    // WINDOW_SAMPLES); if it ever actually fires, speech gets silently cut
+    // rather than the bug being visible. Catch that in debug builds instead
+    // of letting it degrade quietly.
+    debug_assert!(
+        end - start <= WINDOW_SAMPLES,
+        "plan_windows produced a range ({start}..{end}) longer than a window \
+         ({WINDOW_SAMPLES} samples); truncation would silently drop speech"
+    );
     let real_len = buf.len().min(WINDOW_SAMPLES);
     buf.truncate(WINDOW_SAMPLES);
     buf.resize(WINDOW_SAMPLES, 0.0);
