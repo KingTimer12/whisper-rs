@@ -81,14 +81,28 @@ def test_transcribe_returns_an_iterator_and_info(tmp_path):
 
 @pytest.mark.model
 def test_segments_are_produced_lazily(tmp_path):
-    """The generator must not decode until it is iterated."""
+    """The generator must not decode until it is iterated.
+
+    `language` is pinned to "en" here on purpose. When `language=None`,
+    `transcribe()` itself must run a full decode of the first window to
+    detect the language (see `WhisperModel.transcribe` in
+    src/python/model.rs) before it can even return `TranscriptionInfo`. For
+    a short single-window file that eager detection decode dominates setup
+    time, so `consume > setup` would not hold even though the *segment*
+    decoding is genuinely lazy -- it would be measuring the (deliberately
+    eager) language detection, not a laziness bug. Passing `language="en"`
+    skips that detection decode entirely, isolating the thing this test is
+    actually meant to check: that no window is decoded before iteration.
+    Do not remove the pinned language "to simplify" this test -- it changes
+    what the assertion means.
+    """
     import time
 
     model = whisper_rs.WhisperModel("tiny")
     audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
 
     start = time.perf_counter()
-    segments, _ = model.transcribe(str(audio))
+    segments, _ = model.transcribe(str(audio), language="en")
     setup = time.perf_counter() - start
 
     start = time.perf_counter()
@@ -102,10 +116,106 @@ def test_segments_are_produced_lazily(tmp_path):
 
 
 @pytest.mark.model
+def test_transcribe_returns_populated_info_before_any_segment_is_decoded(tmp_path):
+    """Structural counterpart to the timing-based laziness test above.
+
+    Timing assertions are inherently a little flaky; this pins the same
+    claim -- transcribe() finishes setup (decode/VAD/windowing/info) without
+    decoding any segment -- independently of the clock. `language="en"` for
+    the same reason as above: it keeps setup free of the eager
+    language-detection decode so this is purely about segment laziness.
+    """
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
+
+    segments, info = model.transcribe(str(audio), language="en")
+
+    # info is fully realized immediately: these fields are not sentinels.
+    assert info.duration == pytest.approx(4.0, abs=0.1)
+    assert info.duration_after_vad is not None
+    assert info.duration_after_vad <= info.duration
+
+    # The iterator returned alongside it is untouched: a fresh, unconsumed
+    # generator over the windows, not something that already ran a decode.
+    assert iter(segments) is segments
+    first = next(segments, None)
+    # Whatever comes back (a Segment, or None for a silent file), this call
+    # is what triggers the first decode -- proving none happened before it.
+    assert first is None or isinstance(first, whisper_rs.Segment)
+
+
+@pytest.mark.model
+def test_auto_detected_language_is_a_nonempty_string(tmp_path):
+    """The `language=None` path is exercised for correctness, not timing.
+
+    See test_segments_are_produced_lazily's docstring for why timing is not
+    asserted here: this path deliberately runs an eager detection decode.
+    """
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
+
+    _, info = model.transcribe(str(audio))
+
+    assert isinstance(info.language, str)
+    assert info.language != ""
+
+
+@pytest.mark.model
 def test_word_timestamps_are_absent_unless_requested(tmp_path):
     model = whisper_rs.WhisperModel("tiny")
     audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
 
     segments, _ = model.transcribe(str(audio), word_timestamps=False)
     for seg in segments:
+        assert seg.words is None
+
+
+def _say_available() -> bool:
+    import shutil
+
+    return shutil.which("say") is not None
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_word_timestamps_are_plausible_on_real_speech(tmp_path):
+    """Closes the one definition-of-done item synthetic audio cannot prove:
+    that word-level timestamps look like real timestamps, on real speech.
+    """
+    import subprocess
+
+    audio = tmp_path / "speech.wav"
+    subprocess.run(
+        [
+            "say",
+            "-o",
+            str(audio),
+            "--data-format=LEI16@16000",
+            "The quick brown fox jumps over the lazy dog",
+        ],
+        check=True,
+    )
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, _ = model.transcribe(str(audio), language="en", word_timestamps=True)
+    segments = list(segments)
+
+    assert len(segments) >= 1, "real speech should produce at least one segment"
+
+    all_words = []
+    for seg in segments:
+        assert seg.text.strip() != "", "a real-speech segment must have non-empty text"
+        assert seg.words is not None
+        assert len(seg.words) >= 1
+        for w in seg.words:
+            assert w.start <= w.end, f"word {w.word!r} has start > end"
+            assert seg.start - 0.01 <= w.start, f"word {w.word!r} starts before its segment"
+            assert w.end <= seg.end + 0.01, f"word {w.word!r} ends after its segment"
+        all_words.extend(seg.words)
+
+    starts = [w.start for w in all_words]
+    assert starts == sorted(starts), "word start times must be non-decreasing across the transcript"
+
+    segments_no_words, _ = model.transcribe(str(audio), language="en", word_timestamps=False)
+    for seg in segments_no_words:
         assert seg.words is None
