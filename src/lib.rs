@@ -39,6 +39,22 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Construct a diarizer for integration tests.
+///
+/// `diarize` is a private module, so the coexistence test in `tests/` cannot
+/// reach `PolyvoiceDiarizer` directly. This exists for that test alone.
+///
+/// `num_speakers` is always `None`: the coexistence test only needs a
+/// diarizer to construct and run, not the exact-k override added for
+/// under-counting (see `PolyvoiceDiarizer::new`'s doc comment).
+#[cfg(feature = "diarization")]
+#[doc(hidden)]
+pub fn diarize_for_test(
+    max_speakers: usize,
+) -> crate::error::Result<impl diarize::Diarizer> {
+    diarize::polyvoice::PolyvoiceDiarizer::new(max_speakers, None)
+}
+
 #[pymodule]
 fn whisper_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_tracing();

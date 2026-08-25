@@ -95,6 +95,22 @@ long files this is a real, current memory cost proportional to file length
 (16 kHz mono `f32` is 64 KB/s of decoded audio, so roughly 230 MB for a 1
 hour file), independent of the model itself.
 
+**Diarization's CTranslate2/onnxruntime coexistence is verified on macOS,
+not yet confirmed on Linux.** The `diarization` feature links both
+CTranslate2 and `ort` (onnxruntime) into the same process; both statically
+link `protobuf`, which is exactly the collision described above for Silero
+VAD and used to abort the process with `signal: 10, SIGBUS: access to
+undefined memory`. The fix was moving `ort` to `load-dynamic`
+(`tests/coexistence.rs`, `ctranslate2_and_onnxruntime_coexist`, run via
+`cargo test --features diarization --test coexistence -- --ignored`), which
+has been confirmed clean locally on macOS. macOS's two-level namespaces and
+Linux's `RTLD_GLOBAL` symbol resolution are different enough that the fix
+holding on one platform does not guarantee it holds on the other, so CI runs
+this test on both `macos-latest` and `ubuntu-latest` (manual dispatch only,
+in `.github/workflows/CI.yml`'s `coexistence` job) to close that gap. Until
+that job has actually run and passed on Linux, treat Linux diarization
+support as unconfirmed rather than assumed.
+
 **Warnings go to stderr, and are off unless you ask for more.** The crate
 emits `tracing` events for things that are worth knowing but not worth
 failing on -- a synthesized `preprocessor_config.json`, a VAD parameter that
