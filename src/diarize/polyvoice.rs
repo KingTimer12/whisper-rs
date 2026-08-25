@@ -299,4 +299,20 @@ mod tests {
         assert_eq!(compact(Vec::new()), Vec::<usize>::new());
     }
 
+    #[test]
+    #[ignore = "needs an installed onnxruntime; downloads the polyvoice models"]
+    fn both_pipeline_arms_actually_build() {
+        // The test class whose absence let a totally broken exact-k override
+        // ship with a green suite: every other test here returns on an
+        // argument-validation path BEFORE the builder runs, or exercises the
+        // clusterer as free-standing logic with no pipeline at all. Nothing
+        // reached polyvoice's own builder validation, which is exactly where
+        // `Profile::Balanced` + `.with_clusterer()` was being rejected.
+        //
+        // Ignored because it downloads models, so it cannot gate CI -- but it
+        // makes the failure one command away instead of invisible.
+        PolyvoiceDiarizer::new(8, None).expect("the automatic arm must build");
+        PolyvoiceDiarizer::new(8, Some(5)).expect("the exact-k arm must build");
+    }
+
 }
