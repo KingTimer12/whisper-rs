@@ -16,7 +16,10 @@ pub fn to_pyerr(err: Error) -> PyErr {
             PyValueError::new_err(message)
         }
         Error::ModelNotFound { .. } | Error::Download { .. } => PyOSError::new_err(message),
-        Error::Resample(_) | Error::Vad(_) | Error::Ct2(_) => PyRuntimeError::new_err(message),
+        Error::Resample(_) | Error::Vad(_) | Error::Ct2(_) | Error::Diarize(_) => {
+            PyRuntimeError::new_err(message)
+        }
+        Error::OnnxRuntimeMissing { .. } => PyOSError::new_err(message),
     }
 }
 

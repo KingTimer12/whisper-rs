@@ -37,4 +37,10 @@ pub enum Error {
 
     #[error("CTranslate2 failed while transcribing: {0}")]
     Ct2(String),
+
+    #[error("diarization failed: {0}")]
+    Diarize(String),
+
+    #[error("{message}")]
+    OnnxRuntimeMissing { message: String },
 }

@@ -49,6 +49,40 @@ This wraps the official `ct2-transformers-converter` (from the `ctranslate2`/
 conversion is one-shot weight I/O and tensor renaming, and the official
 converter tracks CTranslate2 format changes.
 
+### Speaker diarization
+
+```bash
+pip install "whisper-rs[diarization]"
+```
+
+Pass `diarize=True` to assign a speaker to each segment and each word:
+
+```python
+import whisper_rs
+
+model = whisper_rs.WhisperModel("tiny")
+segments, info = model.transcribe("meeting.wav", diarize=True, num_speakers=3)
+
+print(info.num_speakers)
+for segment in segments:
+    print(segment.speaker, segment.start, segment.end, segment.text)
+    for word in segment.words:
+        print(" ", word.speaker, word.start, word.end, word.word)
+```
+
+`num_speakers` (default `None`) forces an exact speaker count when you know
+it in advance. `max_speakers` (default `8`) only bounds the automatic search
+that runs when `num_speakers` is left unset -- see the limitation below on
+why that automatic search is not reliable. `info.num_speakers` reports the
+distinct speaker count actually found in the returned turns (bounded by
+`max_speakers`, and at most `num_speakers` when it was passed -- it can come
+back lower, because the segmentation stage may find fewer distinct turns than
+there are speakers, and the count reports what was actually found rather than
+what was asked for), and is
+`None` when `diarize=False`. `Segment.speaker` and `Word.speaker` are the
+assigned speaker index, or `None` when no diarization ran or no turn covered
+that span.
+
 ## Known behaviors and limitations (v1)
 
 These are deliberate properties of the current implementation, not bugs --
@@ -94,6 +128,62 @@ call -- there is no streaming/chunked-from-disk decoding path in v1. For very
 long files this is a real, current memory cost proportional to file length
 (16 kHz mono `f32` is 64 KB/s of decoded audio, so roughly 230 MB for a 1
 hour file), independent of the model itself.
+
+**`diarize=True` breaks the iterator's laziness.** Diarization needs the
+whole file before the first speaker can be assigned, so it runs eagerly
+inside `transcribe()`, alongside VAD, windowing, and language detection,
+before `transcribe()` returns. ASR decoding itself stays lazy: segment text
+is still produced only as you iterate `segments`.
+
+**Diarization needs onnxruntime, and it must be dynamically loaded.** The
+`diarization` feature links both CTranslate2 and `ort` (onnxruntime) into
+the same process. Both statically link `protobuf`, and having both static
+copies in one process is exactly the collision described above for Silero
+VAD -- it aborts the process with `signal: 10, SIGBUS: access to undefined
+memory`. Loading `ort` in `load-dynamic` mode instead of linking it
+statically is therefore not a preference, it is the only way the feature can
+coexist with CTranslate2 at all. `pip install whisper-rs[diarization]` pulls
+in `onnxruntime>=1.28`; that floor is named in the "could not initialise"
+error message as a hypothesis about what an initialization failure means,
+not something checked at runtime -- an older or incompatible onnxruntime
+is not rejected up front, it is left to fail however it fails.
+
+**The automatic speaker count under-counts.** With `num_speakers` left
+unset, the automatic clustering search (bounded above by `max_speakers`) was
+measured on a five-voice fixture with well-separated embeddings (pairwise
+cosine off-diagonal 0.0176-0.6070) to find only 3 of the 5 speakers. Passing
+`num_speakers=5` on the same audio yields exactly 5. If you know the speaker
+count, pass `num_speakers` -- relying on the automatic search to report the
+right number is not currently safe.
+
+**There is no `min_speakers`.** `polyvoice` has no such knob; the clustering
+decides the count on its own (see above), bounded only above by
+`max_speakers`, or forced exactly by `num_speakers`.
+
+**Segments split where the speaker changes**, and a split segment's text is
+rebuilt from its words, so it can differ from the unsplit text in
+whitespace. It has to be rebuilt: the underlying decoder trims every word,
+so the original spacing is already gone by the time a split is possible.
+The rebuild puts one space between words and none before punctuation that
+attaches to what it follows, which recovers ordinary prose but will not
+reproduce unusual spacing. Segments that are *not* split keep the decoder's
+own text verbatim.
+
+**Diarization's CTranslate2/onnxruntime coexistence is verified on macOS,
+not yet confirmed on Linux.** The `diarization` feature links both
+CTranslate2 and `ort` (onnxruntime) into the same process; both statically
+link `protobuf`, which is exactly the collision described above for Silero
+VAD and used to abort the process with `signal: 10, SIGBUS: access to
+undefined memory`. The fix was moving `ort` to `load-dynamic`
+(`tests/coexistence.rs`, `ctranslate2_and_onnxruntime_coexist`, run via
+`cargo test --features diarization --test coexistence -- --ignored`), which
+has been confirmed clean locally on macOS. macOS's two-level namespaces and
+Linux's `RTLD_GLOBAL` symbol resolution are different enough that the fix
+holding on one platform does not guarantee it holds on the other, so CI runs
+this test on both `macos-latest` and `ubuntu-latest` (manual dispatch only,
+in `.github/workflows/CI.yml`'s `coexistence` job) to close that gap. Until
+that job has actually run and passed on Linux, treat Linux diarization
+support as unconfirmed rather than assumed.
 
 **Warnings go to stderr, and are off unless you ask for more.** The crate
 emits `tracing` events for things that are worth knowing but not worth

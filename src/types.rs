@@ -45,6 +45,9 @@ pub struct Word {
     pub end: f32,
     pub text: String,
     pub probability: f32,
+    /// Assigned speaker, or `None` when no diarization ran or no turn covered
+    /// this word.
+    pub speaker: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,13 +57,23 @@ pub struct Seg {
     pub end: f32,
     pub text: String,
     pub words: Option<Vec<Word>>,
+    /// Speaker of every word in this segment. `None` when no diarization ran,
+    /// or when this segment's words were all unassignable.
+    pub speaker: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Info {
     pub language: String,
-    /// Always None in v1: not recoverable through the ct2rs API.
+    /// The detector's probability for the detected language. `None` when the
+    /// caller pinned the language (nothing was detected, so there is no score
+    /// to report) or the audio held no speech at all.
     pub language_probability: Option<f32>,
     pub duration: f32,
     pub duration_after_vad: f32,
+    /// Distinct speakers actually present in the returned diarization turns.
+    /// `None` when `diarize=False`; otherwise the count of distinct
+    /// `SpeakerTurn::speaker` values, which may be less than the
+    /// `max_speakers` bound the caller asked for.
+    pub num_speakers: Option<usize>,
 }

@@ -69,3 +69,40 @@ jobs:
       - run: maturin develop --release
       - run: pytest tests/python -v -m model
       - run: cargo test --test e2e -- --ignored
+
+  coexistence:
+    name: CTranslate2/onnxruntime coexistence
+    runs-on: ${{ matrix.os }}
+    # Manual only: this downloads the tiny model. Linux is included
+    # deliberately -- macOS uses two-level namespaces and Linux uses
+    # RTLD_GLOBAL, so Linux coexistence is unproven and this job is how we
+    # find out. A Linux failure here is a finding to record in the README's
+    # platform note, not a reason to drop this job.
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-tiny-${{ runner.os }}
+      - run: pip install onnxruntime huggingface_hub
+      - name: Download tiny model (no-op if already cached)
+        run: python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-tiny')"
+      - name: Locate cached tiny model
+        id: model
+        run: |
+          echo "dir=$(find ~/.cache/huggingface/hub/models--Systran--faster-whisper-tiny/snapshots -maxdepth 1 -type d | tail -1)" >> "$GITHUB_OUTPUT"
+      - run: cargo test --features diarization --test coexistence -- --ignored --nocapture
+        env:
+          CT2_MODEL_DIR: ${{ steps.model.outputs.dir }}

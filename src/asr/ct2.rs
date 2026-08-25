@@ -174,12 +174,14 @@ impl Asr for Ct2Asr {
                                 end: w.end,
                                 text: w.word,
                                 probability: w.probability,
+                                speaker: None,
                             })
                             .collect()
                     })
                 } else {
                     None
                 },
+                speaker: None,
             })
             .collect())
     }

@@ -7,6 +7,9 @@ pub struct Word {
     pub end: f32,
     pub word: String,
     pub probability: f32,
+    /// Assigned speaker, or `None` when no diarization ran or no turn
+    /// covered this word.
+    pub speaker: Option<usize>,
 }
 
 #[pymethods]
@@ -27,14 +30,15 @@ pub struct Segment {
     pub end: f32,
     pub text: String,
     pub words: Option<Vec<Word>>,
+    pub speaker: Option<usize>,
 }
 
 #[pymethods]
 impl Segment {
     fn __repr__(&self) -> String {
         format!(
-            "Segment(id={}, start={:.2}, end={:.2}, text={:?})",
-            self.id, self.start, self.end, self.text
+            "Segment(id={}, start={:.2}, end={:.2}, speaker={:?}, text={:?})",
+            self.id, self.start, self.end, self.speaker, self.text
         )
     }
 }
@@ -43,18 +47,22 @@ impl Segment {
 #[derive(Clone)]
 pub struct TranscriptionInfo {
     pub language: String,
-    /// Always None in v1: not recoverable through the ct2rs API.
+    /// The detector's probability for the detected language. `None` when
+    /// `language=` was pinned (nothing was detected) or the audio held no
+    /// speech at all.
     pub language_probability: Option<f32>,
     pub duration: f32,
     pub duration_after_vad: f32,
+    /// Distinct speakers found by diarization, or `None` when `diarize=False`.
+    pub num_speakers: Option<usize>,
 }
 
 #[pymethods]
 impl TranscriptionInfo {
     fn __repr__(&self) -> String {
         format!(
-            "TranscriptionInfo(language={:?}, duration={:.2}, duration_after_vad={:.2})",
-            self.language, self.duration, self.duration_after_vad
+            "TranscriptionInfo(language={:?}, duration={:.2}, duration_after_vad={:.2}, num_speakers={:?})",
+            self.language, self.duration, self.duration_after_vad, self.num_speakers
         )
     }
 }
@@ -73,9 +81,11 @@ impl From<crate::types::Seg> for Segment {
                         end: w.end,
                         word: w.text,
                         probability: w.probability,
+                        speaker: w.speaker,
                     })
                     .collect()
             }),
+            speaker: s.speaker,
         }
     }
 }
@@ -87,6 +97,7 @@ impl From<crate::types::Info> for TranscriptionInfo {
             language_probability: i.language_probability,
             duration: i.duration,
             duration_after_vad: i.duration_after_vad,
+            num_speakers: i.num_speakers,
         }
     }
 }

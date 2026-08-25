@@ -15,6 +15,7 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 convert = ["ctranslate2", "transformers"]
+diarization = ["onnxruntime>=1.28"]
 
 [tool.maturin]
 python-source = "python"

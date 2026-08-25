@@ -22,6 +22,8 @@ mel_spec = "0.3"
 ndarray = "0.16"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
+polyvoice = { version = "0.17", default-features = false, features = ["pipeline-full"], optional = true }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "std"], optional = true }
 
 [dev-dependencies]
 hound = "3.5"
@@ -29,3 +31,4 @@ hound = "3.5"
 [features]
 extension-module = ["pyo3/extension-module"]
 silero-vad = ["wavekat-vad/silero"]
+diarization = ["dep:polyvoice", "polyvoice/pipeline-full", "dep:ort", "ort/load-dynamic"]

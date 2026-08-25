@@ -149,9 +149,15 @@ def test_transcribe_returns_populated_info_before_any_segment_is_decoded(tmp_pat
 
 
 def _say_available() -> bool:
+    """`say` and `afconvert` are macOS-only binaries used to synthesize the
+    speech fixtures below. Checking the platform alone is not enough: some
+    CI runners are macOS but strip these binaries, or `say` may exist while
+    `afconvert` (needed for the multi-speaker fixture's WAV conversion) does
+    not, so both are checked directly.
+    """
     import shutil
 
-    return shutil.which("say") is not None
+    return shutil.which("say") is not None and shutil.which("afconvert") is not None
 
 
 def _say_wav(path, text: str):
@@ -255,3 +261,228 @@ def test_word_timestamps_are_plausible_on_real_speech(tmp_path):
     assert len(segments_no_words) >= 1, "real speech should produce at least one segment here too"
     for seg in segments_no_words:
         assert seg.words is None
+
+
+@pytest.mark.model
+def test_word_timestamps_false_with_diarize_raises(tmp_path):
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=2.0)
+
+    with pytest.raises(ValueError, match="word_timestamps=False"):
+        model.transcribe(str(audio), diarize=True, word_timestamps=False)
+
+
+@pytest.mark.model
+def test_diarize_false_leaves_speakers_unset(tmp_path):
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=2.0)
+
+    segments, info = model.transcribe(str(audio), language="en")
+
+    assert info.num_speakers is None
+    for seg in segments:
+        assert seg.speaker is None
+
+
+def _say_multi_speaker_wav(path, voices=("Samantha", "Alex", "Fred", "Daniel", "Karen")):
+    """Concatenate one sentence per voice into a 16 kHz mono WAV.
+
+    Generated rather than recorded because the voice order is then exact ground
+    truth for both the speaker count and the turn order -- which no real
+    recording would give.
+    """
+    import subprocess, wave, tempfile, pathlib
+
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    parts = []
+    for i, voice in enumerate(voices):
+        aiff, wav = tmp / f"{i}.aiff", tmp / f"{i}.wav"
+        subprocess.run(
+            ["say", "-v", voice, "-o", str(aiff),
+             f"This is speaker number {i}, saying a full sentence for the test."],
+            check=True,
+        )
+        subprocess.run(
+            ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", str(aiff), str(wav)],
+            check=True,
+        )
+        parts.append(wav)
+
+    out = wave.open(str(path), "wb")
+    with wave.open(str(parts[0]), "rb") as first:
+        params = first.getparams()
+        out.setparams(params)
+    # A short silence gap between voices. Without it the clips abut directly
+    # and the diarizer's segmentation stage -- which finds turns from
+    # silence/energy boundaries, not from the clustering step -- merges
+    # adjacent voices into a single detected turn, capping the number of
+    # embeddings (and therefore the achievable cluster count) below the
+    # actual number of speakers regardless of what `num_speakers` requests.
+    silence = b"\x00\x00" * int(params.framerate * 0.5)
+    for i, part in enumerate(parts):
+        with wave.open(str(part), "rb") as r:
+            out.writeframes(r.readframes(r.getnframes()))
+        if i != len(parts) - 1:
+            out.writeframes(silence)
+    out.close()
+    return path
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_diarization_finds_more_than_four_speakers(tmp_path):
+    """The requirement that ruled out Sortformer, whose NUM_SPEAKERS = 4 is
+    fixed in the model rather than configurable.
+
+    `num_speakers` is passed to force an exact count. Task 0's validation
+    gate measured that polyvoice's automatic speaker-count selection
+    under-counts this same well-separated 5-speaker audio (Task 0 measured 3;
+    this fixture, run during this task, also measured 3), which is why the
+    exact-k override exists at all -- see
+    `test_automatic_speaker_count_is_approximate` below for the honest
+    coverage of that automatic path.
+    """
+    audio = _say_multi_speaker_wav(tmp_path / "five.wav")
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, info = model.transcribe(
+        str(audio), language="en", diarize=True, max_speakers=8, num_speakers=5
+    )
+    segments = list(segments)
+
+    assert info.num_speakers == 5, f"expected exactly 5 speakers, got {info.num_speakers}"
+
+    speakers = {seg.speaker for seg in segments if seg.speaker is not None}
+    assert len(speakers) >= 5, f"segments carry only {len(speakers)} distinct speakers"
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_automatic_speaker_count_is_approximate(tmp_path):
+    """Records the honest behaviour of the automatic (no `num_speakers`)
+    speaker-count selection path.
+
+    Task 0's validation gate measured that polyvoice's automatic selection
+    under-counts badly on this same 5-speaker fixture, despite its
+    embeddings being demonstrably well separated -- Task 0 measured 3, and
+    this fixture, run during this task, also measured 3. This
+    test does not assert a specific count for that reason: an assertion
+    tuned to the observed output would test nothing and would pass no
+    matter how badly the count degraded later. It only asserts that the
+    automatic path runs and returns *some* plausible speaker count. Callers
+    who need an exact, reliable count should pass `num_speakers` explicitly
+    (see `test_diarization_finds_more_than_four_speakers`).
+    """
+    audio = _say_multi_speaker_wav(tmp_path / "five.wav")
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, info = model.transcribe(str(audio), language="en", diarize=True, max_speakers=8)
+    segments = list(segments)
+
+    assert info.num_speakers is not None
+    assert info.num_speakers >= 1
+
+    speakers = {seg.speaker for seg in segments if seg.speaker is not None}
+    assert len(speakers) >= 1
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_every_word_carries_a_speaker(tmp_path):
+    audio = _say_multi_speaker_wav(tmp_path / "five.wav")
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, _ = model.transcribe(str(audio), language="en", diarize=True, num_speakers=5)
+    segments = list(segments)
+
+    assert len(segments) >= 5
+
+    total = attributed = 0
+    for seg in segments:
+        assert seg.words is not None, "diarize=True must enable word timestamps"
+        for w in seg.words:
+            total += 1
+            if w.speaker is not None:
+                attributed += 1
+            # A word's speaker always matches its segment's: segments are
+            # built as runs of same-speaker words.
+            assert w.speaker == seg.speaker
+
+    assert total > 0
+    assert attributed / total > 0.8, (
+        f"only {attributed}/{total} words attributed; assignment is too sparse"
+    )
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_segment_ids_stay_sequential_after_splitting(tmp_path):
+    """Splitting changes how many segments exist, so this is the check that
+    numbering really moved after the split rather than before it."""
+    audio = _say_multi_speaker_wav(tmp_path / "five.wav")
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, _ = model.transcribe(str(audio), language="en", diarize=True, num_speakers=5)
+    ids = [seg.id for seg in segments]
+
+    assert ids == list(range(len(ids))), f"ids are not sequential and gap-free: {ids}"
+
+
+@pytest.mark.model
+def test_max_speakers_without_diarize_is_rejected():
+    # A parameter that cannot be honoured must error rather than be quietly
+    # discarded -- max_speakers=999 is impossible under any configuration.
+    # No model needed: this is checked before any audio work begins.
+    model = whisper_rs.WhisperModel("tiny")
+
+    with pytest.raises(ValueError, match="max_speakers"):
+        model.transcribe("unused.wav", max_speakers=999)
+
+
+@pytest.mark.model
+def test_num_speakers_without_diarize_is_rejected():
+    model = whisper_rs.WhisperModel("tiny")
+
+    with pytest.raises(ValueError, match="num_speakers"):
+        model.transcribe("unused.wav", num_speakers=3)
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_diarization_survives_a_window_boundary(tmp_path):
+    """Every other diarization test fits in one 30 s window, so `advance()`
+    only ever runs with `window.offset == 0`.
+
+    Past 30 s, `stitch` has to shift each word's time by the window offset
+    before `assign` compares it against turns timed against the whole file. Get
+    that wrong and speakers silently stop matching after the first window --
+    which no test that fits in one window can catch.
+    """
+    audio = _say_multi_speaker_wav(
+        tmp_path / "long.wav",
+        # Repeated so the file runs past 30 s while the voices still alternate.
+        voices=("Samantha", "Alex") * 5,
+    )
+
+    with wave.open(str(audio)) as w:
+        duration = w.getnframes() / w.getframerate()
+    assert duration > 30.0, f"the fixture must cross a window boundary, got {duration:.1f}s"
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, info = model.transcribe(str(audio), language="en", diarize=True, num_speakers=2)
+    segments = list(segments)
+
+    assert info.num_speakers == 2
+
+    # The real check: speakers must still be assigned in the second window, not
+    # just the first. Words past 30 s that lost their offset would fall outside
+    # every turn and come back None.
+    late = [s for s in segments if s.start > 30.0]
+    assert late, "the fixture must produce segments past the first window"
+    assert any(s.speaker is not None for s in late), (
+        "no speaker survived past the window boundary: word times are probably "
+        "not being offset onto the global timeline before assignment"
+    )
+
+    ids = [s.id for s in segments]
+    assert ids == list(range(len(ids))), f"ids are not sequential across windows: {ids}"
