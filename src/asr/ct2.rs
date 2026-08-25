@@ -58,6 +58,10 @@ impl Default for Ct2Config {
 pub struct Ct2Asr {
     inner: ct2rs::Whisper,
     options: ct2rs::WhisperOptions,
+    /// Kept so `detect_language` can load a transient detector from the same
+    /// weights; `ct2rs::Whisper` does not expose the ones it holds.
+    model_dir: std::path::PathBuf,
+    config: Ct2Config,
 }
 
 /// Build the ct2rs `Config` from a `Ct2Config`.
@@ -72,7 +76,7 @@ pub struct Ct2Asr {
 /// onto a dedicated field. `num_workers` is clamped to at least 1 so a
 /// misconfigured `0` still produces a working single-replica config instead
 /// of an empty (rejected) device list.
-fn build_config(cfg: &Ct2Config) -> Result<ct2rs::Config> {
+pub(crate) fn build_config(cfg: &Ct2Config) -> Result<ct2rs::Config> {
     Ok(ct2rs::Config {
         device: parse_device(&cfg.device)?,
         compute_type: parse_compute_type(&cfg.compute_type)?,
@@ -102,7 +106,12 @@ impl Ct2Asr {
             ..Default::default()
         };
 
-        Ok(Self { inner, options })
+        Ok(Self {
+            inner,
+            options,
+            model_dir: model_dir.to_path_buf(),
+            config: cfg,
+        })
     }
 
     /// Window size the model expects, in samples.
@@ -175,17 +184,16 @@ impl Asr for Ct2Asr {
             .collect())
     }
 
-    fn detect_language(&self, samples: &[f32]) -> Result<String> {
-        // No detection API exists, so the code is read off the raw output tokens.
-        let raw = self
-            .inner
-            .generate(samples, None, true, &self.options)
-            .map_err(|e| Error::Ct2(e.to_string()))?;
-
-        Ok(raw
-            .iter()
-            .find_map(|line| super::parse_language_token(line))
-            .unwrap_or_else(|| "unknown".to_string()))
+    /// Detect the language with a real encoder pass.
+    ///
+    /// The detector is built here and dropped when this returns: it loads a
+    /// second copy of the weights (see [`super::detect::LanguageDetector`] for
+    /// why it cannot share ours), so it must not outlive the call. Callers
+    /// that want to avoid the load entirely should pin the language instead.
+    fn detect_language(&self, samples: &[f32]) -> Result<(String, f32)> {
+        let detector =
+            super::detect::LanguageDetector::new(&self.model_dir, build_config(&self.config)?)?;
+        detector.detect(samples)
     }
 }
 

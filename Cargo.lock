@@ -4336,12 +4336,16 @@ dependencies = [
  "ct2rs",
  "hf-hub",
  "hound",
+ "mel_spec",
+ "ndarray 0.16.1",
  "pyo3",
  "rubato 5.0.0",
+ "serde",
  "serde_json",
  "symphonia",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
  "wavekat-vad",
 ]
 

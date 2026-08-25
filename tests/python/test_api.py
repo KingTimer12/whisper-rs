@@ -74,7 +74,11 @@ def test_transcribe_returns_an_iterator_and_info(tmp_path):
 
     assert isinstance(info, whisper_rs.TranscriptionInfo)
     assert info.duration == pytest.approx(4.0, abs=0.1)
-    assert info.language_probability is None, "v1 never fabricates this value"
+    # `language` was left as None, so detection ran and reported its own
+    # score. See test_pinned_language_reports_no_probability for the other
+    # side of this: pinning the language leaves it None.
+    assert info.language_probability is not None
+    assert 0.0 < info.language_probability <= 1.0
     assert info.duration_after_vad <= info.duration
     assert iter(segments) is segments, "the iterator must be self-iterable"
 
@@ -144,20 +148,64 @@ def test_transcribe_returns_populated_info_before_any_segment_is_decoded(tmp_pat
     assert first is None or isinstance(first, whisper_rs.Segment)
 
 
-@pytest.mark.model
-def test_auto_detected_language_is_a_nonempty_string(tmp_path):
-    """The `language=None` path is exercised for correctness, not timing.
+def _say_available() -> bool:
+    import shutil
 
-    See test_segments_are_produced_lazily's docstring for why timing is not
-    asserted here: this path deliberately runs an eager detection decode.
+    return shutil.which("say") is not None
+
+
+def _say_wav(path, text: str):
+    """Synthesize `text` as a 16 kHz mono WAV with a known-English voice.
+
+    The voice is pinned: `say`'s default follows the machine's system
+    language, so on a non-English host the "English" fixture would not be
+    English at all and the language-detection assertions would fail for a
+    reason that has nothing to do with this crate.
     """
-    model = whisper_rs.WhisperModel("tiny")
-    audio = write_speechlike_wav(tmp_path / "a.wav", secs=4.0)
+    import subprocess
 
+    subprocess.run(
+        ["say", "-v", "Samantha", "-o", str(path), "--data-format=LEI16@16000", text],
+        check=True,
+    )
+    return path
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_auto_detection_identifies_the_spoken_language(tmp_path):
+    """The `language=None` path, checked against speech of a known language.
+
+    This replaces an earlier version that ran on the synthetic tone and only
+    asserted `info.language != ""`. That assertion held even while detection
+    was completely broken -- it returned the literal string `"unknown"`, which
+    was then fed back to the decoder as the language token `<|unknown|>` and
+    produced confident nonsense. Detection is only meaningfully covered by
+    speech whose language is known in advance, so this test generates it.
+    """
+    audio = _say_wav(tmp_path / "en.wav", "The quick brown fox jumps over the lazy dog")
+
+    model = whisper_rs.WhisperModel("tiny")
     _, info = model.transcribe(str(audio))
 
-    assert isinstance(info.language, str)
-    assert info.language != ""
+    assert info.language == "en", f"English speech detected as {info.language!r}"
+    assert info.language_probability is not None, (
+        "auto-detection must report the detector's own probability"
+    )
+    assert 0.0 < info.language_probability <= 1.0
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_pinned_language_reports_no_probability(tmp_path):
+    """Nothing was detected, so there is no confidence score to report."""
+    audio = _say_wav(tmp_path / "en.wav", "The quick brown fox jumps over the lazy dog")
+
+    model = whisper_rs.WhisperModel("tiny")
+    _, info = model.transcribe(str(audio), language="en")
+
+    assert info.language == "en"
+    assert info.language_probability is None
 
 
 # `test_word_timestamps_are_absent_unless_requested` used to live here as a
@@ -171,31 +219,13 @@ def test_auto_detected_language_is_a_nonempty_string(tmp_path):
 # so the loop body is guaranteed to actually execute wherever it runs.
 
 
-def _say_available() -> bool:
-    import shutil
-
-    return shutil.which("say") is not None
-
-
 @pytest.mark.model
 @pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
 def test_word_timestamps_are_plausible_on_real_speech(tmp_path):
     """Closes the one definition-of-done item synthetic audio cannot prove:
     that word-level timestamps look like real timestamps, on real speech.
     """
-    import subprocess
-
-    audio = tmp_path / "speech.wav"
-    subprocess.run(
-        [
-            "say",
-            "-o",
-            str(audio),
-            "--data-format=LEI16@16000",
-            "The quick brown fox jumps over the lazy dog",
-        ],
-        check=True,
-    )
+    audio = _say_wav(tmp_path / "speech.wav", "The quick brown fox jumps over the lazy dog")
 
     model = whisper_rs.WhisperModel("tiny")
     segments, _ = model.transcribe(str(audio), language="en", word_timestamps=True)

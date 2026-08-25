@@ -68,11 +68,24 @@ the default build (a `tracing::warn!` fires if either is set while
 `silero-vad` is off). Build with `--features silero-vad` for a graded VAD
 backend where those two parameters have an effect.
 
-**`info.language_probability` is always `None`.** `ct2rs` (the CTranslate2
-Rust binding this crate uses) exposes no language-detection API returning a
-confidence score. The language code itself is recovered from the `<|xx|>`
-token Whisper's own output starts with, but there is no probability to go
-with it, and this API does not fabricate one.
+**Auto-detecting the language loads a second, transient copy of the
+weights.** `ct2rs`'s high-level `Whisper` detects the language internally
+when `language` is `None`, but never reports what it detected, and it keeps
+the low-level handle that *can* report it (`ct2rs::sys::Whisper`, whose
+`detect_language` returns every language with its probability) private. So
+when `language` is left as `None`, `transcribe()` loads its own detector from
+the same model directory, runs one encoder pass over the first window, reads
+off the code and its probability, and drops the detector before returning.
+The extra copy is transient rather than resident, but the load is real: for a
+large model it is the dominant cost of the call. Passing `language=`
+explicitly (e.g. `model.transcribe(path, language="en")`) skips detection and
+that load entirely, and is the cheaper path whenever you already know the
+language.
+
+`info.language_probability` carries the detector's probability for the
+detected language, and is `None` when `language=` was pinned (nothing was
+detected, so there is no score to report) or when the file contained no
+speech at all.
 
 **The whole audio file is decoded into memory before anything else
 happens.** `transcribe()` decodes, resamples, VADs, and windows the entire
@@ -82,16 +95,15 @@ long files this is a real, current memory cost proportional to file length
 (16 kHz mono `f32` is 64 KB/s of decoded audio, so roughly 230 MB for a 1
 hour file), independent of the model itself.
 
-**Auto-detecting the language costs an extra full decode.** If `language` is
-left as `None` (the default), `transcribe()` runs a full 30 s decode of the
-first window up front, purely to read the language token off its output,
-before it can return `TranscriptionInfo` (whose `language` field must
-already be populated). That decode is in addition to the ordinary
-transcription decode the same window gets later, once you start iterating
-`segments` -- so on an auto-detected file, the first window is decoded
-twice. Passing `language=` explicitly (e.g. `model.transcribe(path,
-language="en")`) skips the detection decode entirely and is the cheaper
-path whenever you already know the language.
+**Warnings go to stderr, and are off unless you ask for more.** The crate
+emits `tracing` events for things that are worth knowing but not worth
+failing on -- a synthesized `preprocessor_config.json`, a VAD parameter that
+is inert on the current backend, a corrupt packet padded with silence. A
+plain Python process installs no `tracing` subscriber, so importing
+`whisper_rs` installs one on stderr showing warnings and errors. Raise or
+lower it with `WHISPER_RS_LOG` (standard `EnvFilter` syntax, e.g.
+`WHISPER_RS_LOG=whisper_rs=debug`). If the embedding application already set
+a global subscriber, that one wins and this is a no-op.
 
 ## Development
 

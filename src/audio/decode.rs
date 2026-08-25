@@ -67,6 +67,18 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
         message: "stream declares no sample rate".into(),
     })?;
 
+    // `Packet::dur` is expressed in the track's time base, which for audio is
+    // *usually* 1/sample_rate (making `dur` a frame count) but is not
+    // guaranteed to be -- a container is free to declare, say, a millisecond
+    // time base. The gap-filling path below needs frames, so derive the
+    // conversion once here instead of assuming the common case: `dur` ticks
+    // times `numer/denom` seconds per tick, times `sample_rate` frames per
+    // second. When the track declares no time base at all, fall back to
+    // treating `dur` as frames, which is what the common case would give.
+    let frames_per_tick = track.time_base.map(|tb| {
+        f64::from(tb.numer.get()) / f64::from(tb.denom.get()) * f64::from(sample_rate)
+    });
+
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(&audio_params, &AudioDecoderOptions::default())
         .map_err(|e| Error::AudioFormat {
@@ -120,7 +132,9 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
             Err(symphonia::core::errors::Error::ResetRequired) => {
                 return Err(Error::AudioRead {
                     path: path.to_path_buf(),
-                    message: "the stream requires a reset (its track list changed mid-file,                               e.g. a chained/concatenated container) -- unsupported"
+                    message: "the stream requires a reset (its track list changed \
+                              mid-file, e.g. a chained/concatenated container) \
+                              -- unsupported"
                         .into(),
                 });
             }
@@ -153,12 +167,15 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
             // silence for exactly the packet's declared duration instead,
             // keeping the timeline aligned, and warn so this is visible.
             Err(symphonia::core::errors::Error::DecodeError(msg)) => {
+                let frames = match frames_per_tick {
+                    Some(per_tick) => (packet.dur.get() as f64 * per_tick).round() as usize,
+                    None => packet.dur.get() as usize,
+                };
                 tracing::warn!(
-                    "corrupt packet in {}: {msg}; inserting {} samples of silence to keep the timeline aligned",
+                    "corrupt packet in {}: {msg}; inserting {frames} frames of silence to keep the timeline aligned",
                     path.display(),
-                    packet.dur.get()
                 );
-                out.resize(out.len() + packet.dur.get() as usize, 0.0);
+                out.resize(out.len() + frames, 0.0);
             }
             Err(e) => {
                 return Err(Error::AudioRead {

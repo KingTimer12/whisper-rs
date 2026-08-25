@@ -112,12 +112,13 @@ impl WhisperModel {
     /// Loading, VAD, and windowing the *entire* audio file happen eagerly,
     /// synchronously, inside this call (the whole decoded file is held in
     /// memory as `f32` samples -- there is no streaming/chunked-from-disk
-    /// path in v1). If `language` is left as `None`, this call *also* runs
-    /// one extra full 30 s decode up front to auto-detect the language,
-    /// before any segment has been produced -- so auto-detection costs a
-    /// second full decode of the first window on top of that window's
-    /// ordinary transcription decode. Passing `language=` explicitly (e.g.
-    /// `"en"`) skips that detection decode entirely.
+    /// path in v1). If `language` is left as `None`, this call *also*
+    /// auto-detects the language from the first window up front, before any
+    /// segment has been produced. Detection is a single encoder pass (far
+    /// cheaper than the full decode this used to cost), but it loads a
+    /// second, transient copy of the model weights, because `ct2rs` keeps the
+    /// ones this class holds private. Passing `language=` explicitly (e.g.
+    /// `"en"`) skips detection, and that load, entirely.
     ///
     /// # `vad_parameters["threshold"]` / `["neg_threshold"]`
     ///
@@ -131,10 +132,9 @@ impl WhisperModel {
     ///
     /// # `info.language_probability`
     ///
-    /// Always `None` in v1: this API never fabricates a confidence score it
-    /// cannot actually compute (there is no language-detection API in
-    /// `ct2rs`; the code is recovered from Whisper's own leading `<|xx|>`
-    /// token).
+    /// The detector's own probability for the detected language, or `None`
+    /// when `language=` was pinned (nothing was detected, so there is no
+    /// score to report) or when the audio held no speech at all.
     #[pyo3(signature = (
         audio,
         *,
@@ -213,27 +213,32 @@ impl WhisperModel {
 
         let path: PathBuf = audio;
         let asr_for_prep = Arc::clone(&asr);
-        let (windows, mut info) = py
+        let (windows, info) = py
             .detach(move || -> crate::error::Result<_> {
                 let prepared = crate::pipeline::prepare(Path::new(&path), vad_filter, &params)?;
                 let mut info = prepared.info;
 
-                info.language = match language {
-                    Some(code) => code,
+                match language {
+                    Some(code) => info.language = code,
                     None => match prepared.windows.first() {
-                        // One extra 30 s decode, then the code is reused for
-                        // every window so the language cannot flip mid-file.
-                        Some(w) => asr_for_prep.detect_language(&w.samples)?,
-                        None => "unknown".to_string(),
+                        // One encoder pass over the first window; the code is
+                        // then reused for every window so the language cannot
+                        // flip mid-file.
+                        Some(w) => {
+                            let (code, probability) =
+                                asr_for_prep.detect_language(&w.samples)?;
+                            info.language = code;
+                            info.language_probability = Some(probability);
+                        }
+                        // No speech at all: there is nothing to detect from,
+                        // and no probability to report.
+                        None => info.language = "unknown".to_string(),
                     },
-                };
+                }
 
                 Ok((prepared.windows, info))
             })
             .map_err(to_pyerr)?;
-
-        // Never fabricated: the API cannot produce it.
-        info.language_probability = None;
 
         let language = info.language.clone();
         Ok((
