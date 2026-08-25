@@ -45,6 +45,9 @@ pub struct Word {
     pub end: f32,
     pub text: String,
     pub probability: f32,
+    /// Assigned speaker, or `None` when no diarization ran or no turn covered
+    /// this word.
+    pub speaker: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +57,9 @@ pub struct Seg {
     pub end: f32,
     pub text: String,
     pub words: Option<Vec<Word>>,
+    /// Speaker of every word in this segment. `None` when no diarization ran,
+    /// or when this segment's words were all unassignable.
+    pub speaker: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -5,7 +5,7 @@
 //! exhaustively without downloading anything.
 
 use super::SpeakerTurn;
-use crate::types::Word;
+use crate::types::{Seg, Word};
 use std::collections::HashMap;
 
 /// Length of the intersection of two half-open ranges, in seconds.
@@ -63,13 +63,73 @@ pub fn speaker_for(word: &Word, turns: &[SpeakerTurn]) -> Option<usize> {
         .map(|(speaker, _)| speaker)
 }
 
+/// Assign a speaker to every word, then split each segment into runs of
+/// consecutive same-speaker words.
+///
+/// Returned segments carry `id: 0`; sequential numbering is applied later, by
+/// `stitch::number`, because splitting changes how many segments exist and the
+/// iterator that hands them out is lazy.
+///
+/// A split segment's `text` is rebuilt by concatenating its words' text.
+/// Whisper's own segment text is not always exactly the concatenation of its
+/// word texts, so a split segment's text may differ from the original in
+/// whitespace. A segment that is *not* split keeps its original text verbatim.
+pub fn assign(segs: Vec<Seg>, turns: &[SpeakerTurn]) -> Vec<Seg> {
+    let mut out = Vec::with_capacity(segs.len());
+
+    for mut seg in segs {
+        let Some(mut words) = seg.words.take() else {
+            // No word alignment: nothing to assign, nothing to split on.
+            out.push(Seg { speaker: None, words: None, ..seg });
+            continue;
+        };
+
+        if words.is_empty() {
+            out.push(Seg { speaker: None, words: Some(words), ..seg });
+            continue;
+        }
+
+        for word in &mut words {
+            word.speaker = speaker_for(word, turns);
+        }
+
+        // One output segment per run of consecutive words sharing a speaker.
+        // Runs of `None` are runs too, so unattributed speech stays visible
+        // instead of being folded into a neighbour.
+        let mut runs: Vec<Vec<Word>> = Vec::new();
+        for word in words {
+            match runs.last_mut() {
+                Some(run) if run[0].speaker == word.speaker => run.push(word),
+                _ => runs.push(vec![word]),
+            }
+        }
+
+        if runs.len() == 1 {
+            // Unsplit: keep the original text exactly as the ASR produced it.
+            let speaker = runs[0][0].speaker;
+            out.push(Seg { speaker, words: Some(runs.pop().unwrap()), ..seg });
+            continue;
+        }
+
+        for run in runs {
+            let speaker = run[0].speaker;
+            let start = run.first().expect("a run is never empty").start;
+            let end = run.last().expect("a run is never empty").end;
+            let text = run.iter().map(|w| w.text.as_str()).collect::<String>();
+            out.push(Seg { id: 0, start, end, text, words: Some(run), speaker });
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::Word;
 
     fn word(start: f32, end: f32) -> Word {
-        Word { start, end, text: "x".into(), probability: 1.0 }
+        Word { start, end, text: "x".into(), probability: 1.0, speaker: None }
     }
 
     fn turn(start: f32, end: f32, speaker: usize) -> SpeakerTurn {
@@ -150,5 +210,143 @@ mod tests {
     fn a_backwards_turn_never_wins() {
         let turns = vec![turn(5.0, 1.0, 8), turn(0.0, 1.0, 2)];
         assert_eq!(speaker_for(&word(0.0, 1.0), &turns), Some(2));
+    }
+
+    fn seg(start: f32, end: f32, text: &str, words: Option<Vec<Word>>) -> Seg {
+        Seg { id: 0, start, end, text: text.into(), words, speaker: None }
+    }
+
+    fn spoken(start: f32, end: f32, text: &str) -> Word {
+        Word { start, end, text: text.into(), probability: 1.0, speaker: None }
+    }
+
+    #[test]
+    fn a_single_speaker_segment_is_not_split() {
+        let turns = vec![turn(0.0, 5.0, 1)];
+        let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
+            spoken(0.0, 1.0, " hello"),
+            spoken(1.0, 2.0, " world"),
+        ]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].speaker, Some(1));
+        assert_eq!(out[0].text, " hello world");
+        let words = out[0].words.as_ref().unwrap();
+        assert!(words.iter().all(|w| w.speaker == Some(1)));
+    }
+
+    #[test]
+    fn a_segment_splits_where_the_speaker_changes() {
+        let turns = vec![turn(0.0, 1.0, 1), turn(1.0, 2.0, 2)];
+        let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
+            spoken(0.0, 1.0, " hello"),
+            spoken(1.0, 2.0, " world"),
+        ]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 2, "one segment per speaker run");
+        assert_eq!(out[0].speaker, Some(1));
+        assert_eq!(out[0].text, " hello");
+        assert_eq!(out[0].start, 0.0);
+        assert_eq!(out[0].end, 1.0);
+        assert_eq!(out[1].speaker, Some(2));
+        assert_eq!(out[1].text, " world");
+        assert_eq!(out[1].start, 1.0);
+        assert_eq!(out[1].end, 2.0);
+    }
+
+    #[test]
+    fn a_split_segments_bounds_come_from_its_own_words() {
+        // Not from the original segment: the second half must not claim the
+        // first half's start, or the timeline overlaps itself.
+        let turns = vec![turn(0.0, 1.0, 1), turn(1.0, 3.0, 2)];
+        let segs = vec![seg(0.0, 3.0, " a b c", Some(vec![
+            spoken(0.0, 1.0, " a"),
+            spoken(1.0, 2.0, " b"),
+            spoken(2.0, 3.0, " c"),
+        ]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].start, out[0].end), (0.0, 1.0));
+        assert_eq!((out[1].start, out[1].end), (1.0, 3.0));
+        assert_eq!(out[1].text, " b c");
+    }
+
+    #[test]
+    fn a_run_of_unassignable_words_becomes_its_own_segment() {
+        let turns = vec![turn(0.0, 1.0, 1), turn(2.0, 3.0, 1)];
+        let segs = vec![seg(0.0, 3.0, " a b c", Some(vec![
+            spoken(0.0, 1.0, " a"),
+            spoken(1.0, 2.0, " b"),   // gap between turns: unassignable
+            spoken(2.0, 3.0, " c"),
+        ]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].speaker, Some(1));
+        assert_eq!(out[1].speaker, None, "the gap is not attributed to anyone");
+        assert_eq!(out[1].text, " b");
+        assert_eq!(out[2].speaker, Some(1));
+    }
+
+    #[test]
+    fn a_segment_with_no_words_passes_through_unassigned() {
+        // The ASR produced a segment but no word alignment for it, so there is
+        // nothing to assign per-word and nothing to split on.
+        let turns = vec![turn(0.0, 5.0, 1)];
+        let segs = vec![seg(0.0, 2.0, " hello", None)];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].speaker, None);
+        assert!(out[0].words.is_none());
+        assert_eq!(out[0].text, " hello");
+    }
+
+    #[test]
+    fn a_segment_with_an_empty_word_list_passes_through() {
+        let turns = vec![turn(0.0, 5.0, 1)];
+        let segs = vec![seg(0.0, 2.0, " hello", Some(vec![]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].speaker, None);
+        assert_eq!(out[0].text, " hello");
+    }
+
+    #[test]
+    fn no_turns_leaves_every_segment_unassigned_and_unsplit() {
+        let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
+            spoken(0.0, 1.0, " hello"),
+            spoken(1.0, 2.0, " world"),
+        ]))];
+
+        let out = assign(segs, &[]);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].speaker, None);
+        assert_eq!(out[0].text, " hello world");
+    }
+
+    #[test]
+    fn every_segment_is_processed_not_just_the_first() {
+        let turns = vec![turn(0.0, 10.0, 3)];
+        let segs = vec![
+            seg(0.0, 1.0, " one", Some(vec![spoken(0.0, 1.0, " one")])),
+            seg(1.0, 2.0, " two", Some(vec![spoken(1.0, 2.0, " two")])),
+        ];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|s| s.speaker == Some(3)));
     }
 }

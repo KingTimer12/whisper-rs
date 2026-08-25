@@ -33,6 +33,7 @@ pub fn stitch(window: &Window, segs: Vec<Seg>, next_id: &mut u32) -> Vec<Seg> {
                         end: (offset + w.end).min(limit),
                         text: w.text,
                         probability: w.probability,
+                        speaker: None,
                     })
                     .collect::<Vec<_>>()
             })
@@ -51,6 +52,7 @@ pub fn stitch(window: &Window, segs: Vec<Seg>, next_id: &mut u32) -> Vec<Seg> {
             end: (offset + seg.end).min(limit),
             text: seg.text,
             words,
+            speaker: None,
         });
         *next_id += 1;
     }
@@ -72,7 +74,7 @@ mod tests {
     }
 
     fn seg(start: f32, end: f32, text: &str) -> Seg {
-        Seg { id: 0, start, end, text: text.into(), words: None }
+        Seg { id: 0, start, end, text: text.into(), words: None, speaker: None }
     }
 
     #[test]
@@ -132,9 +134,10 @@ mod tests {
             end: 12.0,
             text: "two words".into(),
             words: Some(vec![
-                Word { start: 1.0, end: 1.5, text: "two".into(), probability: 0.9 },
-                Word { start: 9.5, end: 12.0, text: "words".into(), probability: 0.8 },
+                Word { start: 1.0, end: 1.5, text: "two".into(), probability: 0.9, speaker: None },
+                Word { start: 9.5, end: 12.0, text: "words".into(), probability: 0.8, speaker: None },
             ]),
+            speaker: None,
         }];
 
         let out = stitch(&w, segs, &mut id);
@@ -167,7 +170,9 @@ mod tests {
                 end: 13.0,
                 text: "hallucinated".into(),
                 probability: 0.5,
+                speaker: None,
             }]),
+            speaker: None,
         }];
 
         let out = stitch(&w, segs, &mut id);
