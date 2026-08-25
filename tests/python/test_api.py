@@ -426,3 +426,63 @@ def test_segment_ids_stay_sequential_after_splitting(tmp_path):
     ids = [seg.id for seg in segments]
 
     assert ids == list(range(len(ids))), f"ids are not sequential and gap-free: {ids}"
+
+
+@pytest.mark.model
+def test_max_speakers_without_diarize_is_rejected():
+    # A parameter that cannot be honoured must error rather than be quietly
+    # discarded -- max_speakers=999 is impossible under any configuration.
+    # No model needed: this is checked before any audio work begins.
+    model = whisper_rs.WhisperModel("tiny")
+
+    with pytest.raises(ValueError, match="max_speakers"):
+        model.transcribe("unused.wav", max_speakers=999)
+
+
+@pytest.mark.model
+def test_num_speakers_without_diarize_is_rejected():
+    model = whisper_rs.WhisperModel("tiny")
+
+    with pytest.raises(ValueError, match="num_speakers"):
+        model.transcribe("unused.wav", num_speakers=3)
+
+
+@pytest.mark.model
+@pytest.mark.skipif(not _say_available(), reason="macOS `say` is not available on this platform")
+def test_diarization_survives_a_window_boundary(tmp_path):
+    """Every other diarization test fits in one 30 s window, so `advance()`
+    only ever runs with `window.offset == 0`.
+
+    Past 30 s, `stitch` has to shift each word's time by the window offset
+    before `assign` compares it against turns timed against the whole file. Get
+    that wrong and speakers silently stop matching after the first window --
+    which no test that fits in one window can catch.
+    """
+    audio = _say_multi_speaker_wav(
+        tmp_path / "long.wav",
+        # Repeated so the file runs past 30 s while the voices still alternate.
+        voices=("Samantha", "Alex") * 5,
+    )
+
+    with wave.open(str(audio)) as w:
+        duration = w.getnframes() / w.getframerate()
+    assert duration > 30.0, f"the fixture must cross a window boundary, got {duration:.1f}s"
+
+    model = whisper_rs.WhisperModel("tiny")
+    segments, info = model.transcribe(str(audio), language="en", diarize=True, num_speakers=2)
+    segments = list(segments)
+
+    assert info.num_speakers == 2
+
+    # The real check: speakers must still be assigned in the second window, not
+    # just the first. Words past 30 s that lost their offset would fall outside
+    # every turn and come back None.
+    late = [s for s in segments if s.start > 30.0]
+    assert late, "the fixture must produce segments past the first window"
+    assert any(s.speaker is not None for s in late), (
+        "no speaker survived past the window boundary: word times are probably "
+        "not being offset onto the global timeline before assignment"
+    )
+
+    ids = [s.id for s in segments]
+    assert ids == list(range(len(ids))), f"ids are not sequential across windows: {ids}"

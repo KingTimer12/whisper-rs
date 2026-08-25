@@ -75,7 +75,10 @@ it in advance. `max_speakers` (default `8`) only bounds the automatic search
 that runs when `num_speakers` is left unset -- see the limitation below on
 why that automatic search is not reliable. `info.num_speakers` reports the
 distinct speaker count actually found in the returned turns (bounded by
-`max_speakers`, or equal to `num_speakers` when it was passed), and is
+`max_speakers`, and at most `num_speakers` when it was passed -- it can come
+back lower, because the segmentation stage may find fewer distinct turns than
+there are speakers, and the count reports what was actually found rather than
+what was asked for), and is
 `None` when `diarize=False`. `Segment.speaker` and `Word.speaker` are the
 assigned speaker index, or `None` when no diarization ran or no turn covered
 that span.

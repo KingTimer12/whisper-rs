@@ -48,9 +48,14 @@ pub fn speaker_for(word: &Word, turns: &[SpeakerTurn]) -> Option<usize> {
 
     totals
         .into_iter()
-        .max_by(|(_, (a_total, a_start)), (_, (b_total, b_start))| {
+        .max_by(|(a_id, (a_total, a_start)), (b_id, (b_total, b_start))| {
             // Higher total wins; on a tie the earlier start wins, so `b_start`
             // is compared against `a_start` to invert that half of the order.
+            // The speaker id breaks a remaining exact tie: without it two
+            // speakers with identical overlap AND identical earliest start
+            // resolve by HashMap iteration order, which is the
+            // nondeterminism this ordering exists to remove -- the same
+            // audio could then produce different labels run to run.
             a_total
                 .partial_cmp(b_total)
                 .expect("overlap totals are finite")
@@ -59,6 +64,7 @@ pub fn speaker_for(word: &Word, turns: &[SpeakerTurn]) -> Option<usize> {
                         .partial_cmp(a_start)
                         .expect("turn starts are finite")
                 })
+                .then_with(|| b_id.cmp(a_id))
         })
         .map(|(speaker, _)| speaker)
 }
@@ -423,6 +429,18 @@ mod tests {
         assert_eq!(join_words(&[spoken(0.0, 1.0, "alone")]), "alone");
         // A leading punctuation word must not produce a leading space.
         assert_eq!(join_words(&[spoken(0.0, 1.0, "."), spoken(1.0, 2.0, "next")]), ". next");
+    }
+
+    #[test]
+    fn an_exact_tie_resolves_the_same_way_every_time() {
+        // Identical overlap AND identical start: without a final tie-break on
+        // the speaker id this is decided by HashMap iteration order, so the
+        // same audio could label the same word differently between runs.
+        // Looped because a single pass can pass by luck.
+        let turns = vec![turn(0.0, 2.0, 7), turn(0.0, 2.0, 3)];
+        for _ in 0..64 {
+            assert_eq!(speaker_for(&spoken(0.0, 2.0, "x"), &turns), Some(3));
+        }
     }
 
 }

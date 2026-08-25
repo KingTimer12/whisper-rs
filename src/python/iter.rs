@@ -144,7 +144,11 @@ mod tests {
             id: 0,
             start,
             end,
-            text: words.iter().map(|(_, _, w)| *w).collect::<Vec<_>>().join(""),
+            // Space-joined, and the words below are trimmed: this is the
+            // shape ct2rs really produces. A fixture that gives words a
+            // leading space encodes an assumption the ASR does not satisfy --
+            // exactly what hid a run-together text bug in `assign`.
+            text: words.iter().map(|(_, _, w)| *w).collect::<Vec<_>>().join(" "),
             words: Some(
                 words
                     .iter()
@@ -171,7 +175,7 @@ mod tests {
             SpeakerTurn { start: 0.0, end: 1.0, speaker: 0 },
             SpeakerTurn { start: 1.0, end: 2.0, speaker: 1 },
         ];
-        let raw = vec![worded(0.0, 2.0, &[(0.0, 1.0, " a"), (1.0, 2.0, " b")])];
+        let raw = vec![worded(0.0, 2.0, &[(0.0, 1.0, "a"), (1.0, 2.0, "b")])];
 
         let mut next_id = 0;
         let out = advance(&window(0.0, 30.0), raw, &mut next_id, &turns);
@@ -190,14 +194,14 @@ mod tests {
     fn no_turns_leaves_speakers_unset_and_splits_nothing() {
         // The diarize=False path, exercised through the same code path rather
         // than a branch: an empty turns slice must be inert.
-        let raw = vec![worded(0.0, 2.0, &[(0.0, 1.0, " a"), (1.0, 2.0, " b")])];
+        let raw = vec![worded(0.0, 2.0, &[(0.0, 1.0, "a"), (1.0, 2.0, "b")])];
 
         let mut next_id = 0;
         let out = advance(&window(0.0, 30.0), raw, &mut next_id, &[]);
 
         assert_eq!(out.len(), 1, "nothing to split on");
         assert_eq!(out[0].speaker, None);
-        assert_eq!(out[0].text, " a b", "the original ASR text must survive");
+        assert_eq!(out[0].text, "a b", "the original ASR text must survive");
         let words = out[0].words.as_ref().expect("words were requested");
         assert!(words.iter().all(|w| w.speaker.is_none()));
     }

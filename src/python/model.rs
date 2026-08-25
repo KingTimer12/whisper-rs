@@ -29,6 +29,12 @@ use std::sync::Arc;
 /// for segment in segments:
 ///     print(segment.start, segment.end, segment.text)
 /// ```
+/// Default upper bound on the speaker count for `diarize=True`.
+///
+/// Named because the signature default and the "you set this without
+/// diarize=True" check must not be able to drift apart.
+const DEFAULT_MAX_SPEAKERS: usize = 8;
+
 #[pyclass]
 pub struct WhisperModel {
     asr: Arc<Ct2Asr>,
@@ -176,7 +182,7 @@ impl WhisperModel {
         vad_filter = true,
         vad_parameters = None,
         diarize = false,
-        max_speakers = 8,
+        max_speakers = DEFAULT_MAX_SPEAKERS,
         num_speakers = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -205,6 +211,28 @@ impl WhisperModel {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "task {task:?} is not supported in v1, only \"transcribe\""
             )));
+        }
+
+        // The same rule the `word_timestamps` check below enforces, applied to
+        // the other two knobs: a parameter that cannot be honoured must error
+        // rather than be quietly discarded. Without this, `max_speakers=999`
+        // (impossible under any configuration -- the backend takes a u8) and
+        // `num_speakers=99` alongside `diarize=False` are both accepted and
+        // thrown away, and the caller never learns their request did nothing.
+        //
+        // Checked up here, before `prepare`, so the error arrives immediately
+        // instead of after a full decode, VAD and language-detection pass.
+        if !diarize {
+            if max_speakers != DEFAULT_MAX_SPEAKERS {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "max_speakers={max_speakers} has no effect without diarize=True.                      Pass diarize=True, or leave max_speakers unset."
+                )));
+            }
+            if let Some(k) = num_speakers {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "num_speakers={k} has no effect without diarize=True.                      Pass diarize=True, or leave num_speakers unset."
+                )));
+            }
         }
 
         // Per-word speaker assignment requires word timestamps. Silently

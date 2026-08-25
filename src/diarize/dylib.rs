@@ -25,6 +25,16 @@ static INIT: OnceLock<bool> = OnceLock::new();
 ///
 /// We are hosted BY a Python interpreter, so we can just ask it.
 fn onnxruntime_dir() -> Option<PathBuf> {
+    // `Python::attach` ASSERTS that the interpreter is initialised -- it
+    // panics rather than returning an error. This crate is usually a Python
+    // extension, so it usually is; but the `rlib` is also a plain Rust
+    // dependency, and the integration tests are ordinary Rust binaries with
+    // no interpreter at all. Probing that first turns what would be a panic
+    // into "no candidates", so those callers still reach the actionable
+    // OnnxRuntimeMissing error (and can still use ORT_DYLIB_PATH).
+    if unsafe { pyo3::ffi::Py_IsInitialized() } == 0 {
+        return None;
+    }
     pyo3::Python::attach(|py| {
         use pyo3::types::PyAnyMethods;
         let module = py.import("onnxruntime").ok()?;
@@ -46,15 +56,30 @@ fn pip_candidates() -> Vec<PathBuf> {
     let mut found = Vec::new();
     // The wheel ships a version-stamped filename (libonnxruntime.1.29.0.dylib),
     // so the directory is scanned rather than a fixed name being guessed.
+    //
+    // The extension check is load-bearing, not tidiness: that same directory
+    // holds onnxruntime_validation.py, onnxruntime_inference_collection.py and
+    // onnxruntime_pybind11_state.so, all of which match on name alone. Handing
+    // a .py file to `ort::init_from` fails with a message blaming the
+    // onnxruntime VERSION, sending the user to chase a version that was never
+    // the problem -- and `INIT` caches that wrong answer for the process.
     if let Ok(entries) = std::fs::read_dir(&capi) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("libonnxruntime") || name.starts_with("onnxruntime") {
+            let is_library = matches!(
+                entry.path().extension().and_then(|e| e.to_str()),
+                Some("dylib" | "so" | "dll")
+            );
+            if is_library && (name.starts_with("libonnxruntime") || name.starts_with("onnxruntime"))
+            {
                 found.push(entry.path());
             }
         }
     }
+    // `read_dir` order is filesystem-defined. Sorting makes which library gets
+    // picked reproducible across machines instead of a matter of luck.
+    found.sort();
     found
 }
 
@@ -90,8 +115,14 @@ fn locate_in(explicit: Option<PathBuf>, candidates: &[PathBuf]) -> Result<PathBu
 
 /// Locate libonnxruntime: `ORT_DYLIB_PATH` first, then the pip package.
 pub fn locate() -> Result<PathBuf> {
-    let explicit = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
-    locate_in(explicit, &pip_candidates())
+    // ORT_DYLIB_PATH short-circuits: `pip_candidates()` must not even run when
+    // the caller has named a library explicitly. Passing it as an argument
+    // evaluated the probe first, so the documented escape hatch could not
+    // escape anything the probe did on its way.
+    if let Some(explicit) = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from) {
+        return locate_in(Some(explicit), &[]);
+    }
+    locate_in(None, &pip_candidates())
 }
 
 /// Initialise `ort` once per process.
