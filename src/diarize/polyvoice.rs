@@ -120,17 +120,61 @@ impl PolyvoiceDiarizer {
         let registry = polyvoice::models::ModelRegistry::default()
             .map_err(|e| Error::Diarize(format!("model registry construction failed: {e}")))?;
 
-        let mut builder = polyvoice::pipeline_v2::Pipeline::builder()
-            .max_speakers(bounded)
-            .with_models_from(registry);
+        let pipeline = match num_speakers {
+            None => polyvoice::pipeline_v2::Pipeline::builder()
+                .max_speakers(bounded)
+                .with_models_from(registry)
+                .build()
+                .map_err(|e| Error::Diarize(format!("building the pipeline failed: {e}")))?,
+            Some(k) => {
+                // `polyvoice`'s builder only accepts `.with_clusterer()` under
+                // `Profile::Custom`, and `Custom` in turn rejects
+                // `.with_models_from()` — components must be supplied
+                // individually. So the segmenter/embedder that
+                // `Profile::Balanced` would have built from the registry are
+                // built by hand here, and only the clusterer is swapped out.
+                //
+                // This hand-built pipeline is equivalent to the `None` arm's
+                // Balanced profile only because this crate never overrides any
+                // `PipelineConfig` field: `PowersetSegmenter::new` is exactly
+                // `with_config(path, PowersetConfig::default(), auto())`, and
+                // both defaults agree with what the profile path forwards. If
+                // `execution_provider`, `embedder_pool_size`, or
+                // `binarization` is ever made configurable, THIS ARM MUST BE
+                // UPDATED TOO — it hardcodes them, so it would silently stop
+                // honouring a knob the `None` arm honours, and the difference
+                // would show up as diarization quality rather than as a test
+                // failure.
+                let profile_models = registry
+                    .ensure_for_profile(polyvoice::types::Profile::Balanced)
+                    .map_err(|e| {
+                        Error::Diarize(format!("model registry construction failed: {e}"))
+                    })?;
+                let ep = polyvoice::onnx::ExecutionProvider::auto();
+                let segmenter: Box<dyn polyvoice::segmentation::Segmenter> = Box::new(
+                    polyvoice::segmentation::PowersetSegmenter::new(&profile_models.segmenter_path)
+                        .map_err(|e| Error::Diarize(format!("segmenter load failed: {e}")))?,
+                );
+                // Pool size 1: this path is about correctness of the exact-k
+                // override, not embedder throughput, and a single session
+                // sidesteps the multi-session EP races the profile path works
+                // around for CoreML specifically (see `PowersetSegmenter`'s
+                // doc comment).
+                let embedder: Box<dyn polyvoice::embedder::Embedder> = Box::new(
+                    polyvoice::embedder::ResNet34Adapter::new(&profile_models.embedder_path, 1, ep)
+                        .map_err(|e| Error::Diarize(format!("embedder load failed: {e}")))?,
+                );
 
-        if let Some(k) = num_speakers {
-            builder = builder.with_clusterer(Box::new(ExactKClusterer { k }));
-        }
-
-        let pipeline = builder
-            .build()
-            .map_err(|e| Error::Diarize(format!("building the pipeline failed: {e}")))?;
+                polyvoice::pipeline_v2::Pipeline::builder()
+                    .max_speakers(bounded)
+                    .profile(polyvoice::types::Profile::Custom)
+                    .with_segmenter(segmenter)
+                    .with_embedder(embedder)
+                    .with_clusterer(Box::new(ExactKClusterer { k }))
+                    .build()
+                    .map_err(|e| Error::Diarize(format!("building the pipeline failed: {e}")))?
+            }
+        };
 
         Ok(Self { pipeline })
     }
