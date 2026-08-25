@@ -120,6 +120,30 @@ impl WhisperModel {
     /// ones this class holds private. Passing `language=` explicitly (e.g.
     /// `"en"`) skips detection, and that load, entirely.
     ///
+    /// `diarize=True` joins this same eager section: diarization needs the
+    /// whole file's samples before the first speaker can be assigned, so it
+    /// runs synchronously inside this call, alongside VAD, windowing, and
+    /// language detection. Only ASR decoding stays lazy, deferred until
+    /// `segments` is iterated.
+    ///
+    /// # `word_timestamps`
+    ///
+    /// Tri-state, resolved against `diarize`:
+    ///
+    /// | `word_timestamps` | `diarize` | Result |
+    /// |---|---|---|
+    /// | `None` (default) | `False` | word timestamps off |
+    /// | `None` (default) | `True`  | word timestamps on |
+    /// | `True`           | either  | word timestamps on |
+    /// | `False`          | `False` | word timestamps off |
+    /// | `False`          | `True`  | `ValueError` |
+    ///
+    /// Speakers are assigned per word, so diarization requires word
+    /// timestamps; an explicit `False` alongside `diarize=True` is a
+    /// contradiction rather than something silently overridden, and raises
+    /// `ValueError`. Leaving `word_timestamps` unset lets it follow
+    /// `diarize` automatically.
+    ///
     /// # `vad_parameters["threshold"]` / `["neg_threshold"]`
     ///
     /// These two keys are only meaningful when the crate is compiled with
