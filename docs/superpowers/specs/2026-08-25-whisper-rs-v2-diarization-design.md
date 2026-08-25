@@ -73,6 +73,56 @@ project's own GitHub Releases, ungated: pyannote's own weights on Hugging Face
 require accepting conditions on an account, which would be a distribution
 problem for a wheel.
 
+## Task 0 findings (2026-08-25): automatic clustering under-counts
+
+`polyvoice` runs, and the collision is solved — but the validation gate failed on speaker
+count, and the resolution changes this API's contract.
+
+Measured, on 23.7 s of five concatenated macOS `say` voices:
+
+| What | Result |
+| --- | --- |
+| `Profile::Balanced` defaults (PowersetSegmenter + ResNet34Adapter + `Ahc { threshold: 0.45 }`) | **3** speakers of 5 |
+| Every clusterer swap: auto-threshold AHC, fixed AHC 0.30 and 0.20, NME-SC spectral, k-bounded k-means | **2** speakers — worse than the default |
+| 5×5 pairwise cosine similarity of per-voice embeddings | off-diagonal 0.0176–0.6070, median < 0.3, no pair > 0.7 |
+| `kmeans_pp(&embeddings, 5, 100)` with k forced to 5 | `[4,0,3,2,1]` — all five recovered exactly |
+
+The embeddings are separable. The embedder is not the problem, and neither is the fixture: what
+fails is `polyvoice`'s automatic selection of *how many* clusters exist.
+
+**Consequence for this design: the API gains an optional exact speaker count.**
+
+- `num_speakers: Optional[int]` — when given, exactly that many clusters are forced, via a
+  `Clusterer` wrapping `polyvoice::kmeans::kmeans_pp` passed to `PipelineBuilder::with_clusterer`.
+  This is the path that satisfies the more-than-four-speakers requirement.
+- `max_speakers` keeps its meaning as the upper bound for the automatic path.
+- With neither, clustering is automatic and **under-counts**. That is documented as a known
+  limitation with the numbers above, not softened.
+
+The precedent is pyannote's own API, which offers an exact `num_speakers` alongside
+`min_speakers`/`max_speakers` for the same reason.
+
+Two other plan defects the gate caught, both corrected:
+
+1. **`polyvoice` has no `load-dynamic` feature.** It depends on `ort` with `download-binaries`
+   (static) hard-coded. `ort` must therefore be a direct *optional* dependency of this crate
+   with `features = ["load-dynamic", "std"]`. It must **not** be a dev-dependency: this crate is
+   edition 2024, so resolver v3 keeps dev-dependency features out of the normal build graph —
+   `cargo test` would link dynamically and pass while `maturin build` linked statically and
+   crashed for real users. `load-dynamic` implies `ort-sys/disable-linking`, which ort-sys'
+   build script honours before it ever consults `download-binaries`, so one crate enabling it
+   disables static linking for the whole graph.
+2. **`Pipeline::builder().build()` requires `.with_models_from(registry)`.** Omitting it returns
+   `ConfigError::MissingRegistry { profile }`. `ModelRegistry::default()` then auto-downloads
+   `powerset_int8.onnx` and `resnet34_int8.onnx` to the platform cache on first build, with no
+   token and no gate — confirming this document's ungated-models claim empirically, and removing
+   any need for download code of our own.
+
+Unmeasured, deferred to v3: segment-level embedding separability (the numbers above are
+whole-file), the `CamPlusPlusExtractor` embedder, `polyvoice`'s VBx clusterer, and the shipped
+AS-norm default path (VoxConverse `DomainProfile`, z-score threshold 4.0) — the sweep above only
+covered `Profile::Custom`'s raw cosine, so the automatic path may have untested headroom.
+
 **`polyvoice` has not been run.** Everything above is read from its source and
 metadata. The implementation plan's first task is a validation spike whose
 instruction is to stop and report on failure rather than build on top of it —
@@ -212,8 +262,10 @@ for seg in segments:
 - `Word.speaker: Optional[int]`
 - `TranscriptionInfo.num_speakers: Optional[int]` — distinct speakers
   actually assigned, `None` when `diarize=False`.
-- `diarize: bool = False`, `max_speakers: int = 8`. No `min_speakers`:
-  see the component section for why it cannot be honoured.
+- `diarize: bool = False`, `max_speakers: int = 8`,
+  `num_speakers: Optional[int] = None` (exact count; forces k — see the Task 0 findings for
+  why this exists and when you need it). No `min_speakers`: see the component section for why
+  it cannot be honoured.
 
 With `diarize=False` (the default), `speaker` is `None` everywhere and no ONNX
 model is loaded or downloaded. v1 behaviour is unchanged.
