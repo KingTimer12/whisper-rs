@@ -71,4 +71,9 @@ pub struct Info {
     pub language_probability: Option<f32>,
     pub duration: f32,
     pub duration_after_vad: f32,
+    /// Distinct speakers actually present in the returned diarization turns.
+    /// `None` when `diarize=False`; otherwise the count of distinct
+    /// `SpeakerTurn::speaker` values, which may be less than the
+    /// `max_speakers` bound the caller asked for.
+    pub num_speakers: Option<usize>,
 }

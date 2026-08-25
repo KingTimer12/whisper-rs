@@ -10,6 +10,10 @@ pub struct Prepared {
     pub windows: Vec<Window>,
     /// `language` is empty here; the caller fills it after detection.
     pub info: Info,
+    /// The whole decoded, resampled signal. Diarization needs it: global
+    /// clustering across the entire file is what allows an unbounded speaker
+    /// count, so it cannot work from the VAD windows the ASR consumes.
+    pub samples: Vec<f32>,
 }
 
 /// Decode `path`, run VAD, and plan decoder windows.
@@ -37,7 +41,9 @@ pub fn prepare(path: &Path, vad_filter: bool, params: &VadParams) -> Result<Prep
             language_probability: None,
             duration,
             duration_after_vad: after_vad,
+            num_speakers: None,
         },
+        samples,
     })
 }
 

@@ -151,6 +151,9 @@ impl WhisperModel {
         word_timestamps = false,
         vad_filter = true,
         vad_parameters = None,
+        diarize = false,
+        max_speakers = 8,
+        num_speakers = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn transcribe(
@@ -170,6 +173,9 @@ impl WhisperModel {
         word_timestamps: bool,
         vad_filter: bool,
         vad_parameters: Option<Bound<'_, PyDict>>,
+        diarize: bool,
+        max_speakers: usize,
+        num_speakers: Option<usize>,
     ) -> PyResult<(SegmentIterator, TranscriptionInfo)> {
         if task != "transcribe" {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -213,7 +219,7 @@ impl WhisperModel {
 
         let path: PathBuf = audio;
         let asr_for_prep = Arc::clone(&asr);
-        let (windows, info) = py
+        let (windows, info, turns) = py
             .detach(move || -> crate::error::Result<_> {
                 let prepared = crate::pipeline::prepare(Path::new(&path), vad_filter, &params)?;
                 let mut info = prepared.info;
@@ -236,14 +242,68 @@ impl WhisperModel {
                     },
                 }
 
-                Ok((prepared.windows, info))
+                // Diarization consumes the WHOLE file rather than the VAD
+                // windows the ASR decodes: clustering speaker embeddings
+                // globally is what lifts the speaker count off any per-window
+                // limit, so it cannot be done window by window.
+                let turns = if diarize {
+                    diarize_all(&prepared.samples, max_speakers, num_speakers)?
+                } else {
+                    Vec::new()
+                };
+
+                // The distinct speakers actually present in the turns, not the
+                // `max_speakers` bound the caller asked for: reporting the
+                // bound would claim speakers that were never found.
+                info.num_speakers = if diarize {
+                    let mut ids: Vec<usize> = turns.iter().map(|t| t.speaker).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    Some(ids.len())
+                } else {
+                    None
+                };
+
+                Ok((prepared.windows, info, turns))
             })
             .map_err(to_pyerr)?;
 
         let language = info.language.clone();
         Ok((
-            SegmentIterator::new(asr, windows, language, word_timestamps),
+            SegmentIterator::new(asr, windows, language, word_timestamps, turns),
             info.into(),
+        ))
+    }
+}
+
+/// Diarize the whole signal, or explain why this build cannot.
+///
+/// Split out from `transcribe` so the `#[cfg]` pair lives in one place: an
+/// `#[cfg]`-diverging expression inlined into a `let` is easy to get subtly
+/// wrong, and the not-enabled arm must fail loudly. `diarize=True` on a build
+/// without the feature is a request this binary cannot honour, so it errors
+/// rather than silently returning no turns -- which would look exactly like
+/// audio containing no speakers.
+#[cfg_attr(not(feature = "diarization"), allow(unused_variables))]
+fn diarize_all(
+    samples: &[f32],
+    max_speakers: usize,
+    num_speakers: Option<usize>,
+) -> crate::error::Result<Vec<crate::diarize::SpeakerTurn>> {
+    #[cfg(feature = "diarization")]
+    {
+        use crate::diarize::Diarizer;
+        let diarizer =
+            crate::diarize::polyvoice::PolyvoiceDiarizer::new(max_speakers, num_speakers)?;
+        diarizer.diarize(samples)
+    }
+    #[cfg(not(feature = "diarization"))]
+    {
+        Err(crate::error::Error::Diarize(
+            "this build has no diarization support: reinstall with \
+             `pip install whisper-rs[diarization]`, or build the crate with \
+             --features diarization"
+                .to_string(),
         ))
     }
 }
@@ -304,3 +364,19 @@ fn warn_if_inert_on_default_backend(key: &str) {
 
 #[cfg(feature = "silero-vad")]
 fn warn_if_inert_on_default_backend(_key: &str) {}
+
+#[cfg(all(test, not(feature = "diarization")))]
+mod tests {
+    #[test]
+    fn diarize_without_the_feature_errors_instead_of_returning_no_turns() {
+        // Returning an empty Vec here would be indistinguishable from audio
+        // with no detectable speakers, so a build that cannot diarize must say
+        // so, and must say how to get one that can.
+        let err = match super::diarize_all(&[0.0; 16_000], 8, None) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a build without the feature cannot diarize"),
+        };
+        assert!(err.contains("whisper-rs[diarization]"), "got: {err}");
+        assert!(err.contains("--features diarization"), "got: {err}");
+    }
+}

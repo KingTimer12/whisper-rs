@@ -49,14 +49,16 @@ pub struct TranscriptionInfo {
     pub language_probability: Option<f32>,
     pub duration: f32,
     pub duration_after_vad: f32,
+    /// Distinct speakers found by diarization, or `None` when `diarize=False`.
+    pub num_speakers: Option<usize>,
 }
 
 #[pymethods]
 impl TranscriptionInfo {
     fn __repr__(&self) -> String {
         format!(
-            "TranscriptionInfo(language={:?}, duration={:.2}, duration_after_vad={:.2})",
-            self.language, self.duration, self.duration_after_vad
+            "TranscriptionInfo(language={:?}, duration={:.2}, duration_after_vad={:.2}, num_speakers={:?})",
+            self.language, self.duration, self.duration_after_vad, self.num_speakers
         )
     }
 }
@@ -89,6 +91,7 @@ impl From<crate::types::Info> for TranscriptionInfo {
             language_probability: i.language_probability,
             duration: i.duration,
             duration_after_vad: i.duration_after_vad,
+            num_speakers: i.num_speakers,
         }
     }
 }
