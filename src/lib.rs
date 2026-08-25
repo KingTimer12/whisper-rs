@@ -1,6 +1,8 @@
 mod asr;
 mod audio;
 mod chunk;
+#[doc(hidden)]
+pub mod diarize;
 mod error;
 mod models;
 mod pipeline;
