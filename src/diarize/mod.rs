@@ -6,6 +6,8 @@
 
 use crate::error::Result;
 
+pub mod assign;
+
 /// One speaker's continuous turn, in seconds on the global timeline.
 ///
 /// `f32` seconds matches every other timestamp in this crate (`Seg`, `Word`,
