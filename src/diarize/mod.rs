@@ -7,6 +7,8 @@
 use crate::error::Result;
 
 pub mod assign;
+#[cfg(feature = "diarization")]
+pub mod dylib;
 
 /// One speaker's continuous turn, in seconds on the global timeline.
 ///
