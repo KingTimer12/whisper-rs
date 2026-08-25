@@ -9,6 +9,8 @@ use crate::error::Result;
 pub mod assign;
 #[cfg(feature = "diarization")]
 pub mod dylib;
+#[cfg(feature = "diarization")]
+pub mod polyvoice;
 
 /// One speaker's continuous turn, in seconds on the global timeline.
 ///
