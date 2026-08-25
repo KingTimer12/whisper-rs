@@ -7,6 +7,8 @@ use super::{dylib, Diarizer, SpeakerTurn};
 use crate::error::{Error, Result};
 use crate::types::SAMPLE_RATE;
 
+use std::collections::HashMap;
+
 use polyvoice::clusterer::{Clusterer, ClustererError};
 
 /// Wraps `polyvoice::kmeans::kmeans_pp` to force an exact cluster count.
@@ -33,12 +35,43 @@ impl Clusterer for ExactKClusterer {
         // a bug: `kmeans_pp` itself clamps k to embeddings.len(), so mirror
         // that here rather than erroring or panicking.
         let k = self.k.min(embeddings.len());
-        Ok(polyvoice::kmeans::kmeans_pp(embeddings, k, 100))
+        Ok(compact(polyvoice::kmeans::kmeans_pp(embeddings, k, 100)))
     }
 
+    /// The trait documents this as a "hard ceiling", and `self.k` is exactly
+    /// that: `cluster` can return fewer labels (it clamps to
+    /// `embeddings.len()`, and k-means may leave a centroid unclaimed) but
+    /// never more. Reporting the ceiling rather than the clamped value is
+    /// also the safe direction if a consumer ever sizes a buffer from it —
+    /// over-allocating is harmless, under-allocating is not. Checked against
+    /// polyvoice 0.17: no production call site reads this at all (only its
+    /// own tests and the delegating wrapper in `clusterer/mod.rs`), so
+    /// nothing downstream depends on it matching `cluster`'s output width.
     fn max_clusters(&self) -> usize {
         self.k
     }
+}
+
+/// Renumber arbitrary cluster labels onto a dense `0..K` range, preserving
+/// first-appearance order.
+///
+/// The `Clusterer` trait requires `result[i] < unique(result).count()`.
+/// `kmeans_pp` documents only `ret.len() == embeddings.len()`, so its
+/// compactness is not a guarantee we may lean on: an empty cluster (duplicate
+/// or degenerate points leaving a centroid unclaimed) would punch a hole in
+/// the numbering and break the contract. Rather than test what `kmeans_pp`
+/// happens to do today -- a third-party implementation detail free to change
+/// in any release -- this makes the contract hold by construction, so the
+/// guarantee is ours regardless of what the upstream clusterer returns.
+fn compact(labels: Vec<usize>) -> Vec<usize> {
+    let mut seen: HashMap<usize, usize> = HashMap::new();
+    labels
+        .into_iter()
+        .map(|label| {
+            let next = seen.len();
+            *seen.entry(label).or_insert(next)
+        })
+        .collect()
 }
 
 pub struct PolyvoiceDiarizer {
@@ -196,4 +229,30 @@ mod tests {
         let result = clusterer.cluster(&[]).expect("must not error");
         assert!(result.is_empty());
     }
+    #[test]
+    fn compact_renumbers_gaps_onto_a_dense_range() {
+        // Hand-written labels, no clustering involved: this pins OUR contract
+        // rather than probing what kmeans_pp currently returns, so it stays
+        // meaningful across polyvoice upgrades.
+        assert_eq!(compact(vec![0, 2, 2, 5]), vec![0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn compact_preserves_first_appearance_order_and_grouping() {
+        // Labels must be renumbered, never re-grouped: equal inputs stay
+        // equal, distinct inputs stay distinct.
+        let out = compact(vec![7, 3, 7, 9, 3]);
+        assert_eq!(out, vec![0, 1, 0, 2, 1]);
+    }
+
+    #[test]
+    fn compact_leaves_already_dense_labels_untouched() {
+        assert_eq!(compact(vec![0, 1, 1, 2, 0]), vec![0, 1, 1, 2, 0]);
+    }
+
+    #[test]
+    fn compact_of_empty_is_empty() {
+        assert_eq!(compact(Vec::new()), Vec::<usize>::new());
+    }
+
 }
