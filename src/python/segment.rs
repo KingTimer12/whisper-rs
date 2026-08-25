@@ -7,6 +7,9 @@ pub struct Word {
     pub end: f32,
     pub word: String,
     pub probability: f32,
+    /// Assigned speaker, or `None` when no diarization ran or no turn
+    /// covered this word.
+    pub speaker: Option<usize>,
 }
 
 #[pymethods]
@@ -27,14 +30,15 @@ pub struct Segment {
     pub end: f32,
     pub text: String,
     pub words: Option<Vec<Word>>,
+    pub speaker: Option<usize>,
 }
 
 #[pymethods]
 impl Segment {
     fn __repr__(&self) -> String {
         format!(
-            "Segment(id={}, start={:.2}, end={:.2}, text={:?})",
-            self.id, self.start, self.end, self.text
+            "Segment(id={}, start={:.2}, end={:.2}, speaker={:?}, text={:?})",
+            self.id, self.start, self.end, self.speaker, self.text
         )
     }
 }
@@ -77,9 +81,11 @@ impl From<crate::types::Seg> for Segment {
                         end: w.end,
                         word: w.text,
                         probability: w.probability,
+                        speaker: w.speaker,
                     })
                     .collect()
             }),
+            speaker: s.speaker,
         }
     }
 }

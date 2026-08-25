@@ -148,7 +148,7 @@ impl WhisperModel {
         no_repeat_ngram_size = 0,
         max_initial_timestamp = 1.0,
         suppress_blank = true,
-        word_timestamps = false,
+        word_timestamps = None,
         vad_filter = true,
         vad_parameters = None,
         diarize = false,
@@ -170,7 +170,7 @@ impl WhisperModel {
         no_repeat_ngram_size: usize,
         max_initial_timestamp: f32,
         suppress_blank: bool,
-        word_timestamps: bool,
+        word_timestamps: Option<bool>,
         vad_filter: bool,
         vad_parameters: Option<Bound<'_, PyDict>>,
         diarize: bool,
@@ -182,6 +182,23 @@ impl WhisperModel {
                 "task {task:?} is not supported in v1, only \"transcribe\""
             )));
         }
+
+        // Per-word speaker assignment requires word timestamps. Silently
+        // switching on a parameter the caller passed as `False` is the
+        // accept-and-ignore behaviour this crate forbids, so an explicit
+        // `False` alongside `diarize=True` is a contradiction and errors.
+        let word_timestamps = match (word_timestamps, diarize) {
+            (Some(false), true) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "word_timestamps=False cannot be combined with diarize=True: \
+                     speakers are assigned per word, so word timestamps are required. \
+                     Pass word_timestamps=True, or leave it unset to have it enabled \
+                     automatically.",
+                ))
+            }
+            (Some(explicit), _) => explicit,
+            (None, diarize) => diarize,
+        };
 
         let params = vad_params_from_dict(vad_parameters.as_ref())?;
 

@@ -255,3 +255,24 @@ def test_word_timestamps_are_plausible_on_real_speech(tmp_path):
     assert len(segments_no_words) >= 1, "real speech should produce at least one segment here too"
     for seg in segments_no_words:
         assert seg.words is None
+
+
+@pytest.mark.model
+def test_word_timestamps_false_with_diarize_raises(tmp_path):
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=2.0)
+
+    with pytest.raises(ValueError, match="word_timestamps=False"):
+        model.transcribe(str(audio), diarize=True, word_timestamps=False)
+
+
+@pytest.mark.model
+def test_diarize_false_leaves_speakers_unset(tmp_path):
+    model = whisper_rs.WhisperModel("tiny")
+    audio = write_speechlike_wav(tmp_path / "a.wav", secs=2.0)
+
+    segments, info = model.transcribe(str(audio), language="en")
+
+    assert info.num_speakers is None
+    for seg in segments:
+        assert seg.speaker is None
