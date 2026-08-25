@@ -43,7 +43,9 @@ impl Segment {
 #[derive(Clone)]
 pub struct TranscriptionInfo {
     pub language: String,
-    /// Always None in v1: not recoverable through the ct2rs API.
+    /// The detector's probability for the detected language. `None` when
+    /// `language=` was pinned (nothing was detected) or the audio held no
+    /// speech at all.
     pub language_probability: Option<f32>,
     pub duration: f32,
     pub duration_after_vad: f32,
