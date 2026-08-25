@@ -10,6 +10,12 @@ use pyo3::types::PyDict;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Default upper bound on the speaker count for `diarize=True`.
+///
+/// Named because the signature default and the "you set this without
+/// diarize=True" check must not be able to drift apart.
+const DEFAULT_MAX_SPEAKERS: usize = 8;
+
 /// A loaded Whisper model, ready to transcribe audio files.
 ///
 /// Loads (downloading if needed) a CTranslate2-converted Whisper checkpoint
@@ -29,12 +35,6 @@ use std::sync::Arc;
 /// for segment in segments:
 ///     print(segment.start, segment.end, segment.text)
 /// ```
-/// Default upper bound on the speaker count for `diarize=True`.
-///
-/// Named because the signature default and the "you set this without
-/// diarize=True" check must not be able to drift apart.
-const DEFAULT_MAX_SPEAKERS: usize = 8;
-
 #[pyclass]
 pub struct WhisperModel {
     asr: Arc<Ct2Asr>,
@@ -225,12 +225,14 @@ impl WhisperModel {
         if !diarize {
             if max_speakers != DEFAULT_MAX_SPEAKERS {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "max_speakers={max_speakers} has no effect without diarize=True.                      Pass diarize=True, or leave max_speakers unset."
+                    "max_speakers={max_speakers} has no effect without diarize=True. \
+                     Pass diarize=True, or leave max_speakers unset."
                 )));
             }
             if let Some(k) = num_speakers {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "num_speakers={k} has no effect without diarize=True.                      Pass diarize=True, or leave num_speakers unset."
+                    "num_speakers={k} has no effect without diarize=True. \
+                     Pass diarize=True, or leave num_speakers unset."
                 )));
             }
         }
