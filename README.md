@@ -159,7 +159,12 @@ decides the count on its own (see above), bounded only above by
 
 **Segments split where the speaker changes**, and a split segment's text is
 rebuilt from its words, so it can differ from the unsplit text in
-whitespace.
+whitespace. It has to be rebuilt: the underlying decoder trims every word,
+so the original spacing is already gone by the time a split is possible.
+The rebuild puts one space between words and none before punctuation that
+attaches to what it follows, which recovers ordinary prose but will not
+reproduce unusual spacing. Segments that are *not* split keep the decoder's
+own text verbatim.
 
 **Diarization's CTranslate2/onnxruntime coexistence is verified on macOS,
 not yet confirmed on Linux.** The `diarization` feature links both
