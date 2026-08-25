@@ -75,8 +75,9 @@ impl SegmentIterator {
                 }
             };
 
+            let mut stitched = crate::stitch::stitch(&window, raw);
             let mut next_id = slf.next_id;
-            let stitched = crate::stitch::stitch(&window, raw, &mut next_id);
+            crate::stitch::number(&mut stitched, &mut next_id);
             slf.next_id = next_id;
             slf.pending.extend(stitched);
             // Loop again: an empty window must not end the iteration.
