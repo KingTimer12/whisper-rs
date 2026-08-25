@@ -12,18 +12,32 @@ use std::sync::OnceLock;
 
 static INIT: OnceLock<bool> = OnceLock::new();
 
+/// Where the `onnxruntime` pip package lives, asked of the interpreter that
+/// actually loaded this extension.
+///
+/// Shelling out to whichever `python3` is on `PATH` finds the WRONG
+/// interpreter whenever the caller is in a virtualenv -- which is the normal
+/// case. Observed directly: onnxruntime installed in the project venv, the
+/// extension imported from that venv, and the probe still reporting "not
+/// found", because `python3` resolved to a Homebrew interpreter that has no
+/// onnxruntime. The user has done exactly what the error message told them to
+/// do and the error message does not go away.
+///
+/// We are hosted BY a Python interpreter, so we can just ask it.
+fn onnxruntime_dir() -> Option<PathBuf> {
+    pyo3::Python::attach(|py| {
+        use pyo3::types::PyAnyMethods;
+        let module = py.import("onnxruntime").ok()?;
+        let file: String = module.getattr("__file__").ok()?.extract().ok()?;
+        PathBuf::from(file).parent().map(PathBuf::from)
+    })
+}
+
 /// Candidate paths inside an installed `onnxruntime` pip package.
 fn pip_candidates() -> Vec<PathBuf> {
-    let Ok(output) = std::process::Command::new("python3")
-        .args(["-c", "import onnxruntime, os; print(os.path.dirname(onnxruntime.__file__))"])
-        .output()
-    else {
+    let Some(dir) = onnxruntime_dir() else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
     if dir.as_os_str().is_empty() {
         return Vec::new();
     }

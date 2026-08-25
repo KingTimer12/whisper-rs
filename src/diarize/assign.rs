@@ -63,6 +63,36 @@ pub fn speaker_for(word: &Word, turns: &[SpeakerTurn]) -> Option<usize> {
         .map(|(speaker, _)| speaker)
 }
 
+/// Rebuild readable text from words whose original spacing is gone.
+///
+/// `ct2rs` trims every word before returning it (`whisper.rs`, where the
+/// decoded token text is `.trim()`ed), so a word never carries the leading
+/// space Whisper's own segment text has. Concatenating them directly is
+/// therefore not "close enough" -- it produces `Thisisspeakernumberzero`,
+/// which was what a run of the documented README example actually printed.
+///
+/// The exact original spacing is unrecoverable here: it was discarded
+/// upstream, before this crate saw the words. So this rejoins on the usual
+/// convention -- one space between words, and none before a token that
+/// attaches to the word it follows (closing punctuation, contractions). It is
+/// a heuristic, and it is only ever applied to segments that were SPLIT;
+/// unsplit segments keep the ASR's own text untouched.
+fn join_words(words: &[Word]) -> String {
+    let mut text = String::new();
+    for word in words {
+        let attaches = word
+            .text
+            .chars()
+            .next()
+            .is_none_or(|c| ",.!?;:%)]}'\u{2019}".contains(c));
+        if !text.is_empty() && !attaches {
+            text.push(' ');
+        }
+        text.push_str(&word.text);
+    }
+    text
+}
+
 /// Assign a speaker to every word, then split each segment into runs of
 /// consecutive same-speaker words.
 ///
@@ -70,10 +100,9 @@ pub fn speaker_for(word: &Word, turns: &[SpeakerTurn]) -> Option<usize> {
 /// `stitch::number`, because splitting changes how many segments exist and the
 /// iterator that hands them out is lazy.
 ///
-/// A split segment's `text` is rebuilt by concatenating its words' text.
-/// Whisper's own segment text is not always exactly the concatenation of its
-/// word texts, so a split segment's text may differ from the original in
-/// whitespace. A segment that is *not* split keeps its original text verbatim.
+/// A split segment's `text` is rebuilt from its words by `join_words`, so it
+/// may differ from the original in whitespace. A segment that is *not* split
+/// keeps its original text verbatim.
 pub fn assign(segs: Vec<Seg>, turns: &[SpeakerTurn]) -> Vec<Seg> {
     let mut out = Vec::with_capacity(segs.len());
 
@@ -115,7 +144,7 @@ pub fn assign(segs: Vec<Seg>, turns: &[SpeakerTurn]) -> Vec<Seg> {
             let speaker = run[0].speaker;
             let start = run.first().expect("a run is never empty").start;
             let end = run.last().expect("a run is never empty").end;
-            let text = run.iter().map(|w| w.text.as_str()).collect::<String>();
+            let text = join_words(&run);
             out.push(Seg { id: 0, start, end, text, words: Some(run), speaker });
         }
     }
@@ -224,8 +253,8 @@ mod tests {
     fn a_single_speaker_segment_is_not_split() {
         let turns = vec![turn(0.0, 5.0, 1)];
         let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
-            spoken(0.0, 1.0, " hello"),
-            spoken(1.0, 2.0, " world"),
+            spoken(0.0, 1.0, "hello"),
+            spoken(1.0, 2.0, "world"),
         ]))];
 
         let out = assign(segs, &turns);
@@ -241,19 +270,19 @@ mod tests {
     fn a_segment_splits_where_the_speaker_changes() {
         let turns = vec![turn(0.0, 1.0, 1), turn(1.0, 2.0, 2)];
         let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
-            spoken(0.0, 1.0, " hello"),
-            spoken(1.0, 2.0, " world"),
+            spoken(0.0, 1.0, "hello"),
+            spoken(1.0, 2.0, "world"),
         ]))];
 
         let out = assign(segs, &turns);
 
         assert_eq!(out.len(), 2, "one segment per speaker run");
         assert_eq!(out[0].speaker, Some(1));
-        assert_eq!(out[0].text, " hello");
+        assert_eq!(out[0].text, "hello");
         assert_eq!(out[0].start, 0.0);
         assert_eq!(out[0].end, 1.0);
         assert_eq!(out[1].speaker, Some(2));
-        assert_eq!(out[1].text, " world");
+        assert_eq!(out[1].text, "world");
         assert_eq!(out[1].start, 1.0);
         assert_eq!(out[1].end, 2.0);
     }
@@ -264,9 +293,9 @@ mod tests {
         // first half's start, or the timeline overlaps itself.
         let turns = vec![turn(0.0, 1.0, 1), turn(1.0, 3.0, 2)];
         let segs = vec![seg(0.0, 3.0, " a b c", Some(vec![
-            spoken(0.0, 1.0, " a"),
-            spoken(1.0, 2.0, " b"),
-            spoken(2.0, 3.0, " c"),
+            spoken(0.0, 1.0, "a"),
+            spoken(1.0, 2.0, "b"),
+            spoken(2.0, 3.0, "c"),
         ]))];
 
         let out = assign(segs, &turns);
@@ -274,16 +303,16 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].start, out[0].end), (0.0, 1.0));
         assert_eq!((out[1].start, out[1].end), (1.0, 3.0));
-        assert_eq!(out[1].text, " b c");
+        assert_eq!(out[1].text, "b c");
     }
 
     #[test]
     fn a_run_of_unassignable_words_becomes_its_own_segment() {
         let turns = vec![turn(0.0, 1.0, 1), turn(2.0, 3.0, 1)];
         let segs = vec![seg(0.0, 3.0, " a b c", Some(vec![
-            spoken(0.0, 1.0, " a"),
-            spoken(1.0, 2.0, " b"),   // gap between turns: unassignable
-            spoken(2.0, 3.0, " c"),
+            spoken(0.0, 1.0, "a"),
+            spoken(1.0, 2.0, "b"),   // gap between turns: unassignable
+            spoken(2.0, 3.0, "c"),
         ]))];
 
         let out = assign(segs, &turns);
@@ -291,7 +320,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].speaker, Some(1));
         assert_eq!(out[1].speaker, None, "the gap is not attributed to anyone");
-        assert_eq!(out[1].text, " b");
+        assert_eq!(out[1].text, "b");
         assert_eq!(out[2].speaker, Some(1));
     }
 
@@ -325,8 +354,8 @@ mod tests {
     #[test]
     fn no_turns_leaves_every_segment_unassigned_and_unsplit() {
         let segs = vec![seg(0.0, 2.0, " hello world", Some(vec![
-            spoken(0.0, 1.0, " hello"),
-            spoken(1.0, 2.0, " world"),
+            spoken(0.0, 1.0, "hello"),
+            spoken(1.0, 2.0, "world"),
         ]))];
 
         let out = assign(segs, &[]);
@@ -340,8 +369,8 @@ mod tests {
     fn every_segment_is_processed_not_just_the_first() {
         let turns = vec![turn(0.0, 10.0, 3)];
         let segs = vec![
-            seg(0.0, 1.0, " one", Some(vec![spoken(0.0, 1.0, " one")])),
-            seg(1.0, 2.0, " two", Some(vec![spoken(1.0, 2.0, " two")])),
+            seg(0.0, 1.0, " one", Some(vec![spoken(0.0, 1.0, "one")])),
+            seg(1.0, 2.0, " two", Some(vec![spoken(1.0, 2.0, "two")])),
         ];
 
         let out = assign(segs, &turns);
@@ -349,4 +378,51 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|s| s.speaker == Some(3)));
     }
+    #[test]
+    fn a_split_segments_text_is_readable_not_run_together() {
+        // The shape the ASR really produces: ct2rs trims every word, so none
+        // of them carry the leading space Whisper's segment text has.
+        // Concatenating them yielded `Thisisspeakerone` in a real run of the
+        // documented README example.
+        let turns = vec![turn(0.0, 2.0, 0), turn(2.0, 4.0, 1)];
+        let segs = vec![seg(0.0, 4.0, "this is speaker one", Some(vec![
+            spoken(0.0, 1.0, "this"),
+            spoken(1.0, 2.0, "is"),
+            spoken(2.0, 3.0, "speaker"),
+            spoken(3.0, 4.0, "one"),
+        ]))];
+
+        let out = assign(segs, &turns);
+
+        assert_eq!(out.len(), 2, "the speaker change must split the segment");
+        assert_eq!(out[0].text, "this is");
+        assert_eq!(out[1].text, "speaker one");
+    }
+
+    #[test]
+    fn punctuation_attaches_to_the_word_it_follows() {
+        // Whisper emits punctuation as its own word. Spacing it like a word
+        // ("zero , saying") is the obvious failure of a naive space-join.
+        let words = vec![
+            spoken(0.0, 1.0, "speaker"),
+            spoken(1.0, 2.0, "zero"),
+            spoken(2.0, 3.0, ","),
+            spoken(3.0, 4.0, "saying"),
+            spoken(4.0, 5.0, "it"),
+            spoken(5.0, 6.0, "'s"),
+            spoken(6.0, 7.0, "done"),
+            spoken(7.0, 8.0, "."),
+        ];
+
+        assert_eq!(join_words(&words), "speaker zero, saying it's done.");
+    }
+
+    #[test]
+    fn join_words_handles_the_empty_and_single_word_cases() {
+        assert_eq!(join_words(&[]), "");
+        assert_eq!(join_words(&[spoken(0.0, 1.0, "alone")]), "alone");
+        // A leading punctuation word must not produce a leading space.
+        assert_eq!(join_words(&[spoken(0.0, 1.0, "."), spoken(1.0, 2.0, "next")]), ". next");
+    }
+
 }
