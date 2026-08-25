@@ -75,12 +75,59 @@ impl SegmentIterator {
                 }
             };
 
-            let mut stitched = crate::stitch::stitch(&window, raw);
             let mut next_id = slf.next_id;
-            crate::stitch::number(&mut stitched, &mut next_id);
+            let stitched = advance(&window, raw, &mut next_id);
             slf.next_id = next_id;
             slf.pending.extend(stitched);
             // Loop again: an empty window must not end the iteration.
         }
+    }
+}
+
+/// One window's worth of post-decode work: stitch onto the global timeline,
+/// then number sequentially from `next_id`.
+///
+/// Extracted from `__next__` so the id threading is testable without a model:
+/// the counter round-trip is the property segment ids depend on, and
+/// `__next__` itself cannot be constructed in a unit test because it owns an
+/// `Arc<Ct2Asr>`. (A later `turns: &[SpeakerTurn]` parameter for
+/// speaker-assignment slots in here, between stitch and number.)
+fn advance(window: &Window, raw: Vec<Seg>, next_id: &mut u32) -> Vec<Seg> {
+    let mut stitched = crate::stitch::stitch(window, raw);
+    crate::stitch::number(&mut stitched, next_id);
+    stitched
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SAMPLE_RATE, WINDOW_SAMPLES};
+
+    fn window(offset_secs: f32, real_secs: f32) -> Window {
+        Window {
+            offset: (offset_secs * SAMPLE_RATE as f32) as usize,
+            samples: vec![0.0; WINDOW_SAMPLES],
+            real_len: (real_secs * SAMPLE_RATE as f32) as usize,
+        }
+    }
+
+    fn seg(start: f32, end: f32, text: &str) -> Seg {
+        Seg { id: 0, start, end, text: text.into(), words: None, speaker: None }
+    }
+
+    #[test]
+    fn ids_thread_sequentially_across_windows_via_advance() {
+        // This is the production path `__next__` calls: it exercises the
+        // exact counter round-trip (read slf.next_id, stitch + number,
+        // write the advanced value back) that ids depend on end to end.
+        let mut next_id = 0;
+
+        let first = advance(&window(0.0, 30.0), vec![seg(0.0, 1.0, "a"), seg(1.0, 2.0, "b")], &mut next_id);
+        assert_eq!(first.iter().map(|s| s.id).collect::<Vec<_>>(), vec![0, 1]);
+
+        let second = advance(&window(30.0, 30.0), vec![seg(0.0, 1.0, "c")], &mut next_id);
+        assert_eq!(second[0].id, 2, "ids must continue across windows without a gap");
+
+        assert_eq!(next_id, 3, "the counter must be left ready for the next window");
     }
 }
