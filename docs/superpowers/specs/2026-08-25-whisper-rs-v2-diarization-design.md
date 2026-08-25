@@ -368,3 +368,102 @@ v3 should measure before it changes anything.
 7. `word_timestamps=False` with `diarize=True` raises `ValueError`.
 8. The CTranslate2 + onnxruntime coexistence test passes on macOS, and its
    Linux result is known and recorded either way.
+
+## Task 0 findings
+
+A spike (`tests/spike_polyvoice.rs`, deleted after this record was made)
+ran `polyvoice` 0.17 end to end against a 5-voice macOS `say` fixture
+(Samantha, Alex, Fred, Daniel, Karen concatenated, 16 kHz mono, 23.7 s).
+
+**Result: no SIGBUS, no `ConfigError` — but `num_speakers = 3`, under the
+5 required.** This is failure mode 3 from the task-0 brief: diarization runs
+but under-counts, and per the brief this blocks Task 1 pending a design
+conversation about clusterer/embedder tuning or defaults.
+
+Working call sequence:
+
+```rust
+ort::init_from(&dylib).expect("...").commit();   // ORT_DYLIB_PATH, load-dynamic mode
+
+let registry = polyvoice::models::ModelRegistry::default()?;   // NOT optional --
+                                                                 // Pipeline::builder().build()
+                                                                 // fails with
+                                                                 // ConfigError::MissingRegistry
+                                                                 // without it
+
+let pipeline = polyvoice::pipeline_v2::Pipeline::builder()
+    .max_speakers(8)
+    .with_models_from(registry)
+    .build()?;
+
+let sr = polyvoice::types::SampleRate::new(16_000)?;
+let result = pipeline.run(&samples, sr)?;
+```
+
+Turn list observed (`num_speakers = 3`):
+
+```
+speaker=0  0.00..9.58
+speaker=1  9.58..14.77
+speaker=2  14.77..19.22
+speaker=0 19.32..23.63
+```
+
+Speakers 3 (Daniel) and 4 (Karen) were merged into clusters already assigned
+to speakers 0/1/2 — the pipeline under-clustered, not under-segmented (the
+turn boundaries at ~9.6s/14.8s/19.3s roughly track the actual utterance
+boundaries, so segmentation found more than 3 turns' worth of boundaries but
+clustering collapsed them to 3 speaker identities).
+
+**Defaults in effect** (`Profile::Balanced`, the `PipelineConfig::default()`,
+none overridden except `max_speakers(8)`):
+- Segmenter: `PowersetSegmenter` loading `powerset_int8.onnx`.
+- Embedder: `ResNet34Adapter` loading `resnet34_int8.onnx`.
+- Clusterer: `ClustererKind::Ahc { threshold: 0.45 }` (`DEFAULT_AHC_THRESHOLD`,
+  `polyvoice::types::config`) — agglomerative hierarchical clustering.
+- `max_speakers`: 8 (spike override; profile default is 20).
+- `min_cluster_size`: 1 (no pruning).
+- `resegment_overlap`: true.
+- `execution_provider`: `ExecutionProvider::auto()`.
+
+**How models were obtained:** `polyvoice::models::ModelRegistry::default()`
+resolves a cache dir at `~/Library/Caches/polyvoice/models` (macOS) from the
+crate's embedded manifest, and `ensure_for_profile` downloaded
+`powerset_int8.onnx` and `resnet34_int8.onnx` into that cache on first run —
+no manual model-fetch step, no HF token, no venv needed for models. This is
+separate from the ONNX Runtime dylib itself, which was supplied via
+`ORT_DYLIB_PATH` pointing at a pip-installed `onnxruntime` wheel's
+`libonnxruntime.1.29.0.dylib` (a pre-existing spike artifact reused per Task
+0 runner instructions, not re-derived here).
+
+**Errors encountered along the way (both resolved before the run above,
+recorded because they contradict the brief's literal steps):**
+
+1. `cargo add polyvoice@0.17 --optional --no-default-features --features pipeline-full,load-dynamic`
+   fails at the `cargo add` step itself:
+   ```
+   error: unrecognized feature for crate polyvoice: load-dynamic
+   ```
+   `polyvoice` 0.17 has no `load-dynamic` feature of its own (it forwards to `ort`
+   internally). Resolution: add polyvoice with `--features pipeline-full` only;
+   `load-dynamic` is obtained by adding `ort` as a direct dev-dependency with
+   `--features load-dynamic,std`, which via Cargo feature unification turns on
+   `load-dynamic` for the single shared `ort` crate instance polyvoice also
+   depends on. Verified with `cargo tree --features diarization -e features`:
+   both `ort feature "load-dynamic"` and `ort feature "download-binaries"`
+   (polyvoice's own default) show as active on the same `ort` node.
+
+2. First `build()` call (no registry) failed with:
+   ```
+   MissingRegistry { profile: Balanced }
+   ```
+   (`polyvoice::pipeline_v2::ConfigError::MissingRegistry`). The brief's Step 3
+   spike code omits `.with_models_from(...)`; `Profile::Balanced`,
+   `Profile::Mobile`, and `Profile::Fast` all require it. Resolution: call
+   `polyvoice::models::ModelRegistry::default()` and pass it to
+   `.with_models_from(registry)` before `.build()`. Task 6 must include this
+   registry call — it is not optional plumbing.
+
+**Conclusion: gate outcome is failure mode 3 (under-counting), not fatal to
+the design but blocking Task 1 until embedder/clusterer tuning (e.g. a lower
+AHC threshold, `ClustererKind::NmeSc`, or a different profile) is decided.**
