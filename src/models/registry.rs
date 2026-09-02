@@ -23,6 +23,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("large-v3", "Systran/faster-whisper-large-v3"),
     ("large", "Systran/faster-whisper-large-v3"),
     ("distil-large-v3", "distil-whisper/distil-large-v3-ct2"),
+    ("nemotron", "nvidia/nemotron-3.5-asr-streaming-0.6b"),
 ];
 
 pub fn resolve(name: &str) -> ModelRef {
@@ -67,6 +68,14 @@ mod tests {
         assert_eq!(
             resolve("distil-large-v3"),
             ModelRef::Hub { repo: "distil-whisper/distil-large-v3-ct2".into() }
+        );
+    }
+
+    #[test]
+    fn nemotron_alias_maps_to_the_nvidia_repo() {
+        assert_eq!(
+            resolve("nemotron"),
+            ModelRef::Hub { repo: "nvidia/nemotron-3.5-asr-streaming-0.6b".into() }
         );
     }
 
