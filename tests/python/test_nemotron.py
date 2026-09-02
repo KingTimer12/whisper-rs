@@ -3,9 +3,10 @@
 `whisper_rs.NemotronModel` only exists when the extension was built with
 `--features nemotron`; every test in this file is skipped (not errored) on a
 build without it. Tests marked `model` download the ~0.6B Nemotron model on
-first run (`nvidia/nemotron-3.5-asr-streaming-0.6b`, via the `"nemotron"`
-alias) -- see `tests/python/test_api.py` for the audio-fixture helper this
-file reuses.
+first run, via the `"nemotron"` alias, which resolves to the ONNX export at
+`altunenes/parakeet-rs` (subdirectory `nemotron-3.5-asr-streaming-0.6b-onnx`)
+-- see README.md for why, and `tests/python/test_api.py` for the
+audio-fixture helper this file reuses.
 """
 
 import pytest
