@@ -1,4 +1,4 @@
-use crate::asr::{ct2::Ct2Asr, Asr};
+use crate::asr::Asr;
 use crate::diarize::SpeakerTurn;
 use crate::python::segment::Segment;
 use crate::python::to_pyerr;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Lazily decodes one window per __next__ call.
 #[pyclass]
 pub struct SegmentIterator {
-    asr: Arc<Ct2Asr>,
+    asr: Arc<dyn Asr>,
     windows: VecDeque<Window>,
     pending: VecDeque<Seg>,
     next_id: u32,
@@ -24,7 +24,7 @@ pub struct SegmentIterator {
 
 impl SegmentIterator {
     pub fn new(
-        asr: Arc<Ct2Asr>,
+        asr: Arc<dyn Asr>,
         windows: Vec<Window>,
         language: String,
         word_timestamps: bool,
