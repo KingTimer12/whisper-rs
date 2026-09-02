@@ -2,6 +2,8 @@
 
 pub mod iter;
 pub mod model;
+#[cfg(feature = "nemotron")]
+pub mod nemotron_model;
 pub mod segment;
 
 use crate::error::Error;

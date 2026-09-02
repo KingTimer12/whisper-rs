@@ -326,14 +326,7 @@ impl WhisperModel {
                 // The distinct speakers actually present in the turns, not the
                 // `max_speakers` bound the caller asked for: reporting the
                 // bound would claim speakers that were never found.
-                info.num_speakers = if diarize {
-                    let mut ids: Vec<usize> = turns.iter().map(|t| t.speaker).collect();
-                    ids.sort_unstable();
-                    ids.dedup();
-                    Some(ids.len())
-                } else {
-                    None
-                };
+                info.num_speakers = distinct_speakers(diarize, &turns);
 
                 Ok((prepared.windows, info, turns))
             })
@@ -356,7 +349,7 @@ impl WhisperModel {
 /// rather than silently returning no turns -- which would look exactly like
 /// audio containing no speakers.
 #[cfg_attr(not(feature = "diarization"), allow(unused_variables))]
-fn diarize_all(
+pub(crate) fn diarize_all(
     samples: &[f32],
     max_speakers: usize,
     num_speakers: Option<usize>,
@@ -379,7 +372,24 @@ fn diarize_all(
     }
 }
 
-fn vad_params_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<VadParams> {
+/// The distinct speakers actually present in `turns`, not the `max_speakers`
+/// bound the caller asked for: reporting the bound would claim speakers that
+/// were never found. `None` when `diarize` is `false` (no diarization ran).
+pub(crate) fn distinct_speakers(
+    diarize: bool,
+    turns: &[crate::diarize::SpeakerTurn],
+) -> Option<usize> {
+    if diarize {
+        let mut ids: Vec<usize> = turns.iter().map(|t| t.speaker).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Some(ids.len())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn vad_params_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<VadParams> {
     let mut params = VadParams::default();
     let Some(dict) = dict else {
         return Ok(params);

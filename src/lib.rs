@@ -73,6 +73,8 @@ pub fn nemotron_for_test(model_dir: &std::path::Path) -> crate::error::Result<im
 fn whisper_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_tracing();
     m.add_class::<python::model::WhisperModel>()?;
+    #[cfg(feature = "nemotron")]
+    m.add_class::<python::nemotron_model::NemotronModel>()?;
     m.add_class::<python::iter::SegmentIterator>()?;
     m.add_class::<python::segment::Segment>()?;
     m.add_class::<python::segment::Word>()?;
