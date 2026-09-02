@@ -90,6 +90,7 @@ pip install "whisper-rs[nemotron]"
 ```
 
 `NemotronModel` is a second ASR engine available alongside the default `WhisperModel`.
+The pip extra provides the runtime `onnxruntime` dependency, but `NemotronModel` itself only exists in a wheel built with the `nemotron` Cargo feature.
 Use it when you want to try the Nemotron architecture and decoder:
 
 ```python
@@ -112,6 +113,8 @@ segments, info = model.transcribe("meeting.wav", diarize=True, num_speakers=3)
 for segment in segments:
     print(segment.speaker, segment.start, segment.end, segment.text)
 ```
+
+Note: using `diarize=True` on `NemotronModel` requires the wheel to be built with both `nemotron` and `diarization` Cargo features compiled in.
 
 ## Known behaviors and limitations (v1)
 
