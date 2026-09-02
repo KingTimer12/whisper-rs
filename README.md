@@ -116,6 +116,8 @@ for segment in segments:
 
 Note: using `diarize=True` on `NemotronModel` requires the wheel to be built with both `nemotron` and `diarization` Cargo features compiled in.
 
+The `"nemotron"` model name resolves to `altunenes/parakeet-rs`, a third-party mirror maintained by the `parakeet-rs` author (not NVIDIA's own repo, which ships NeMo/safetensors/GGUF weights that `NemotronModel` cannot load); you can instead point `NemotronModel` at a local directory containing `encoder.onnx`, `decoder_joint.onnx`, and `tokenizer.model`, either downloaded yourself or exported from NVIDIA's base model with `parakeet-rs`'s `scripts/export_nemotron_streaming_multilingual.py`.
+
 ## Known behaviors and limitations (v1)
 
 These are deliberate properties of the current implementation, not bugs --

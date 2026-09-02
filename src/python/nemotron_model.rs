@@ -7,7 +7,7 @@
 
 use crate::asr::nemotron::{NemotronAsr, NemotronConfig};
 use crate::asr::Asr;
-use crate::models::hub::{ensure_model, FetchOptions};
+use crate::models::hub::{ensure_nemotron_model, FetchOptions};
 use crate::python::iter::SegmentIterator;
 use crate::python::model::{diarize_all, distinct_speakers, vad_params_from_dict, DEFAULT_MAX_SPEAKERS};
 use crate::python::segment::TranscriptionInfo;
@@ -68,7 +68,7 @@ impl NemotronModel {
         let name = model.to_string();
         let (asr, model_dir) = py
             .detach(move || -> crate::error::Result<(NemotronAsr, PathBuf)> {
-                let dir = ensure_model(&name, &opts)?;
+                let dir = ensure_nemotron_model(&name, &opts)?;
                 let asr = NemotronAsr::new(&dir, config)?;
                 Ok((asr, dir))
             })
