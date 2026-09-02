@@ -13,8 +13,10 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct NemotronConfig {
-    /// Ignored for `NemotronMode::EnglishOnly`, which has no language
-    /// conditioning at all.
+    /// For `NemotronMode::EnglishOnly`, which has no language conditioning
+    /// at all, only `"auto"` or an English variant (`"en"`, `"en-US"`, ...)
+    /// can be honoured; anything else is rejected with an error rather than
+    /// silently ignored -- see `resolve_target_lang`.
     pub target_lang: Option<String>,
 }
 
@@ -48,6 +50,41 @@ fn parse_lang_tag(piece: &str) -> Option<&str> {
     shape_ok.then_some(inner)
 }
 
+/// Whether `lang` denotes English (case/region variants included): `"en"`,
+/// `"EN"`, `"en-US"`, `"en-GB"`, etc. Used to decide whether an
+/// `EnglishOnly` model can honour a requested language without erroring.
+fn is_english(lang: &str) -> bool {
+    let lang = lang.split(['-', '_']).next().unwrap_or(lang);
+    lang.eq_ignore_ascii_case("en")
+}
+
+/// Decide whether a requested language can be applied to `mode`, and if so,
+/// whether `set_target_lang` actually needs calling.
+///
+/// - `Multilingual`: always honoured; the caller should forward `lang` to
+///   `set_target_lang`.
+/// - `EnglishOnly`: `"auto"` (the "don't force a language" sentinel) and any
+///   English variant are trivially satisfied without calling
+///   `set_target_lang` (the model has no language conditioning at all).
+///   Anything else cannot be honoured and must error -- accept-and-ignore is
+///   forbidden in this crate.
+fn resolve_target_lang(mode: NemotronMode, lang: &str) -> Result<Option<&str>> {
+    match mode {
+        NemotronMode::Multilingual => Ok(Some(lang)),
+        NemotronMode::EnglishOnly => {
+            if lang == "auto" || is_english(lang) {
+                Ok(None)
+            } else {
+                Err(Error::Nemotron(format!(
+                    "target_lang {lang:?} cannot be honoured: the loaded model is \
+                     English-only and has no language conditioning, so only \"auto\" \
+                     or an English code (\"en\", \"en-US\", ...) can be satisfied"
+                )))
+            }
+        }
+    }
+}
+
 impl NemotronAsr {
     pub fn new(model_dir: &Path, config: NemotronConfig) -> Result<Self> {
         crate::onnx::init_ort()?;
@@ -56,13 +93,12 @@ impl NemotronAsr {
             .map_err(|e| Error::Nemotron(format!("failed to load Nemotron model: {e}")))?;
         let mode = nemotron.mode();
 
-        #[allow(clippy::collapsible_if)] // two independent conditions read more clearly separate
-        if mode == NemotronMode::Multilingual {
-            if let Some(lang) = &config.target_lang {
-                nemotron.set_target_lang(lang).map_err(|e| {
-                    Error::Nemotron(format!("unsupported target_lang {lang:?}: {e}"))
-                })?;
-            }
+        if let Some(lang) = &config.target_lang
+            && let Some(lang) = resolve_target_lang(mode, lang)?
+        {
+            nemotron
+                .set_target_lang(lang)
+                .map_err(|e| Error::Nemotron(format!("unsupported target_lang {lang:?}: {e}")))?;
         }
 
         Ok(Self {
@@ -84,13 +120,12 @@ impl Asr for NemotronAsr {
             .lock()
             .map_err(|_| Error::Nemotron("model lock poisoned".into()))?;
 
-        #[allow(clippy::collapsible_if)] // two independent conditions read more clearly separate
-        if self.mode == NemotronMode::Multilingual {
-            if let Some(lang) = language {
-                nemotron.set_target_lang(lang).map_err(|e| {
-                    Error::Nemotron(format!("unsupported target_lang {lang:?}: {e}"))
-                })?;
-            }
+        if let Some(lang) = language
+            && let Some(lang) = resolve_target_lang(self.mode, lang)?
+        {
+            nemotron
+                .set_target_lang(lang)
+                .map_err(|e| Error::Nemotron(format!("unsupported target_lang {lang:?}: {e}")))?;
         }
 
         let mode = if word_timestamps {
@@ -117,6 +152,13 @@ impl Asr for NemotronAsr {
                     start: t.start,
                     end: t.end,
                     text: t.text.clone(),
+                    // Placeholder: `transcribe_audio_with_timestamps`'s
+                    // `TimedToken` carries no per-token confidence (only
+                    // `text`/`start`/`end`). A real value would require a
+                    // second full decode pass via
+                    // `transcribe_audio_with_tokens`'s `TokenInfo::logprob`,
+                    // which is too expensive to run just for this. Same
+                    // convention as `src/python/iter.rs:159`.
                     probability: 1.0,
                     speaker: None,
                 })
@@ -203,6 +245,49 @@ mod tests {
     fn wrong_case_is_not_a_tag() {
         assert_eq!(parse_lang_tag("<EN>"), None);
         assert_eq!(parse_lang_tag("<en-us>"), None);
+    }
+
+    #[test]
+    fn english_only_accepts_auto() {
+        assert_eq!(
+            resolve_target_lang(NemotronMode::EnglishOnly, "auto").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn english_only_accepts_en() {
+        assert_eq!(
+            resolve_target_lang(NemotronMode::EnglishOnly, "en").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn english_only_accepts_uppercase_region_variant() {
+        assert_eq!(
+            resolve_target_lang(NemotronMode::EnglishOnly, "EN-US").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn english_only_rejects_non_english() {
+        let err = resolve_target_lang(NemotronMode::EnglishOnly, "pt").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("pt"), "message should name the code: {msg}");
+        assert!(
+            msg.contains("English-only"),
+            "message should explain why: {msg}"
+        );
+    }
+
+    #[test]
+    fn multilingual_accepts_non_english() {
+        assert_eq!(
+            resolve_target_lang(NemotronMode::Multilingual, "pt").unwrap(),
+            Some("pt")
+        );
     }
 
     /// The Arc<NemotronAsr> design in the Python layer requires this. It is

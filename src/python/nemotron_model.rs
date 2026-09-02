@@ -125,6 +125,11 @@ impl NemotronModel {
     /// is only populated when a detection pass actually ran, since there is
     /// no probability to report for a language pinned by the caller or by
     /// `target_lang`.
+    ///
+    /// Every `word.probability` in the returned segments is always `1.0`:
+    /// the underlying timestamped-token API carries no per-token
+    /// confidence, and computing a real value would require an expensive
+    /// second full decode pass, so it is not attempted.
     #[pyo3(signature = (
         audio,
         *,
