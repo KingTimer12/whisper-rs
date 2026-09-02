@@ -2,6 +2,8 @@
 
 pub mod ct2;
 pub mod detect;
+#[cfg(feature = "nemotron")]
+pub mod nemotron;
 
 use crate::error::Result;
 use crate::types::Seg;

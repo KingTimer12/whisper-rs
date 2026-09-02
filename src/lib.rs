@@ -1,4 +1,5 @@
-mod asr;
+#[doc(hidden)]
+pub mod asr;
 mod audio;
 mod chunk;
 #[doc(hidden)]
