@@ -13,8 +13,10 @@ use std::sync::Arc;
 /// Default upper bound on the speaker count for `diarize=True`.
 ///
 /// Named because the signature default and the "you set this without
-/// diarize=True" check must not be able to drift apart.
-const DEFAULT_MAX_SPEAKERS: usize = 8;
+/// diarize=True" check must not be able to drift apart. Shared with
+/// `NemotronModel` (`nemotron_model.rs`), which has the identical check and
+/// must not be able to drift from this one either.
+pub(crate) const DEFAULT_MAX_SPEAKERS: usize = 8;
 
 /// A loaded Whisper model, ready to transcribe audio files.
 ///
