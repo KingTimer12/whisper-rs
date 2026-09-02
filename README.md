@@ -83,6 +83,36 @@ what was asked for), and is
 assigned speaker index, or `None` when no diarization ran or no turn covered
 that span.
 
+### Nemotron ASR engine
+
+```bash
+pip install "whisper-rs[nemotron]"
+```
+
+`NemotronModel` is a second ASR engine available alongside the default `WhisperModel`.
+Use it when you want to try the Nemotron architecture and decoder:
+
+```python
+import whisper_rs
+
+model = whisper_rs.NemotronModel("nemotron")
+segments, info = model.transcribe("audio.wav")
+
+for segment in segments:
+    print(segment.start, segment.end, segment.text)
+```
+
+`NemotronModel` follows the same transcription interface as `WhisperModel` and
+also supports speaker diarization with `diarize=True`:
+
+```python
+model = whisper_rs.NemotronModel("nemotron")
+segments, info = model.transcribe("meeting.wav", diarize=True, num_speakers=3)
+
+for segment in segments:
+    print(segment.speaker, segment.start, segment.end, segment.text)
+```
+
 ## Known behaviors and limitations (v1)
 
 These are deliberate properties of the current implementation, not bugs --
