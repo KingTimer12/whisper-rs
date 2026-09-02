@@ -1,10 +1,13 @@
-mod asr;
+#[doc(hidden)]
+pub mod asr;
 mod audio;
 mod chunk;
 #[doc(hidden)]
 pub mod diarize;
 mod error;
 mod models;
+#[cfg(any(feature = "diarization", feature = "nemotron"))]
+mod onnx;
 mod pipeline;
 mod python;
 mod stitch;
@@ -55,10 +58,23 @@ pub fn diarize_for_test(
     diarize::polyvoice::PolyvoiceDiarizer::new(max_speakers, None)
 }
 
+/// Construct a Nemotron backend for integration tests.
+///
+/// `asr` is a private-in-spirit module (only `#[doc(hidden)] pub` for this
+/// reason); the coexistence test in `tests/` cannot reach `NemotronAsr`
+/// directly otherwise.
+#[cfg(feature = "nemotron")]
+#[doc(hidden)]
+pub fn nemotron_for_test(model_dir: &std::path::Path) -> crate::error::Result<impl asr::Asr> {
+    asr::nemotron::NemotronAsr::new(model_dir, asr::nemotron::NemotronConfig::default())
+}
+
 #[pymodule]
 fn whisper_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_tracing();
     m.add_class::<python::model::WhisperModel>()?;
+    #[cfg(feature = "nemotron")]
+    m.add_class::<python::nemotron_model::NemotronModel>()?;
     m.add_class::<python::iter::SegmentIterator>()?;
     m.add_class::<python::segment::Segment>()?;
     m.add_class::<python::segment::Word>()?;

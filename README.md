@@ -83,6 +83,41 @@ what was asked for), and is
 assigned speaker index, or `None` when no diarization ran or no turn covered
 that span.
 
+### Nemotron ASR engine
+
+```bash
+pip install "whisper-rs[nemotron]"
+```
+
+`NemotronModel` is a second ASR engine available alongside the default `WhisperModel`.
+The pip extra provides the runtime `onnxruntime` dependency, but `NemotronModel` itself only exists in a wheel built with the `nemotron` Cargo feature.
+Use it when you want to try the Nemotron architecture and decoder:
+
+```python
+import whisper_rs
+
+model = whisper_rs.NemotronModel("nemotron")
+segments, info = model.transcribe("audio.wav")
+
+for segment in segments:
+    print(segment.start, segment.end, segment.text)
+```
+
+`NemotronModel` follows the same transcription interface as `WhisperModel` and
+also supports speaker diarization with `diarize=True`:
+
+```python
+model = whisper_rs.NemotronModel("nemotron")
+segments, info = model.transcribe("meeting.wav", diarize=True, num_speakers=3)
+
+for segment in segments:
+    print(segment.speaker, segment.start, segment.end, segment.text)
+```
+
+Note: using `diarize=True` on `NemotronModel` requires the wheel to be built with both `nemotron` and `diarization` Cargo features compiled in.
+
+The `"nemotron"` model name resolves to `altunenes/parakeet-rs`, a third-party mirror maintained by the `parakeet-rs` author (not NVIDIA's own repo, which ships NeMo/safetensors/GGUF weights that `NemotronModel` cannot load); you can instead point `NemotronModel` at a local directory containing `encoder.onnx`, `decoder_joint.onnx`, and `tokenizer.model`, either downloaded yourself or exported from NVIDIA's base model with `parakeet-rs`'s `scripts/export_nemotron_streaming_multilingual.py`.
+
 ## Known behaviors and limitations (v1)
 
 These are deliberate properties of the current implementation, not bugs --

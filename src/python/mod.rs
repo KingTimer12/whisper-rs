@@ -2,6 +2,8 @@
 
 pub mod iter;
 pub mod model;
+#[cfg(feature = "nemotron")]
+pub mod nemotron_model;
 pub mod segment;
 
 use crate::error::Error;
@@ -16,7 +18,7 @@ pub fn to_pyerr(err: Error) -> PyErr {
             PyValueError::new_err(message)
         }
         Error::ModelNotFound { .. } | Error::Download { .. } => PyOSError::new_err(message),
-        Error::Resample(_) | Error::Vad(_) | Error::Ct2(_) | Error::Diarize(_) => {
+        Error::Resample(_) | Error::Vad(_) | Error::Ct2(_) | Error::Diarize(_) | Error::Nemotron(_) => {
             PyRuntimeError::new_err(message)
         }
         Error::OnnxRuntimeMissing { .. } => PyOSError::new_err(message),
@@ -57,6 +59,15 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let err = to_pyerr(Error::Ct2("boom".into()));
+            assert!(err.is_instance_of::<PyRuntimeError>(py));
+        });
+    }
+
+    #[test]
+    fn nemotron_errors_become_runtime_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            let err = to_pyerr(Error::Nemotron("boom".into()));
             assert!(err.is_instance_of::<PyRuntimeError>(py));
         });
     }
