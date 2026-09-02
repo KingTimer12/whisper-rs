@@ -41,6 +41,9 @@ pub enum Error {
     #[error("diarization failed: {0}")]
     Diarize(String),
 
+    #[error("nemotron failed: {0}")]
+    Nemotron(String),
+
     #[error("{message}")]
     OnnxRuntimeMissing { message: String },
 }
