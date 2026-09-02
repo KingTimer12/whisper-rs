@@ -155,12 +155,22 @@ impl Asr for NemotronAsr {
             .iter()
             .find_map(|t| parse_lang_tag(&t.text).map(|lang| (lang, t.logprob)))
         {
-            // `logprob` is a log-softmax value (<= 0) over the full vocab for
-            // this token, i.e. the model's own confidence that this was the
-            // right token to emit at this position — including the tag
-            // token competing against every other vocab entry. Converting it
-            // back out of log-space gives a genuine probability-like
-            // confidence in [0, 1], unlike a hardcoded constant.
+            // `logprob` is the tag token's log-softmax over the *entire*
+            // vocabulary (~13k pieces: every language tag and every ordinary
+            // text piece), not a distribution restricted to language
+            // alternatives. `.exp()` turns it into a well-formed value in
+            // (0, 1], but it answers "how confident was the decoder in
+            // emitting this exact token next, versus 13k unrelated
+            // alternatives" — a proxy correlated with language confidence,
+            // not a language-detection probability. It can be misleadingly
+            // high or low independent of actual language ambiguity (e.g. a
+            // tag can dominate the position-0 softmax just because few other
+            // tokens are plausible there, regardless of how ambiguous the
+            // language is). This is NOT comparable to the Whisper backend's
+            // `detect_language` (`src/asr/detect.rs`), whose probability is
+            // a genuine softmax over language candidates only. Still an
+            // improvement over a hardcoded constant, since it does vary with
+            // the model's actual output.
             Some((lang, logprob)) => Ok((lang.to_string(), logprob.exp())),
             None => Ok(("unknown".to_string(), 0.0)),
         }
@@ -193,5 +203,15 @@ mod tests {
     fn wrong_case_is_not_a_tag() {
         assert_eq!(parse_lang_tag("<EN>"), None);
         assert_eq!(parse_lang_tag("<en-us>"), None);
+    }
+
+    /// The Arc<NemotronAsr> design in the Python layer requires this. It is
+    /// already guaranteed by `impl Asr for NemotronAsr` compiling (`Asr:
+    /// Send + Sync`, see `src/asr/mod.rs`) — this records that fact rather
+    /// than leaving it as an open question.
+    #[test]
+    fn nemotron_asr_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<NemotronAsr>();
     }
 }
