@@ -5,6 +5,8 @@ mod chunk;
 pub mod diarize;
 mod error;
 mod models;
+#[cfg(any(feature = "diarization", feature = "nemotron"))]
+mod onnx;
 mod pipeline;
 mod python;
 mod stitch;

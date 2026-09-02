@@ -1,5 +1,11 @@
 //! Locating libonnxruntime at runtime.
 //!
+//! Shared by the `diarization` and `nemotron` features: both need the same
+//! `load-dynamic` onnxruntime to coexist with CTranslate2's static
+//! `protobuf` (see `docs/superpowers/specs/2026-08-25-whisper-rs-v2-diarization-design.md`),
+//! and initializing `ort` twice from two independent `OnceLock`s would be
+//! the bug this module exists to prevent.
+//!
 //! `ort` runs in `load-dynamic` mode because static linking collides with
 //! CTranslate2's `protobuf` and crashes the process with `SIGBUS`. The
 //! trade-off is that the dylib has to be found at runtime, and a failure to

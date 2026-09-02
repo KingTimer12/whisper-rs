@@ -3,8 +3,9 @@
 //! Entirely behind the `diarization` feature: without it, `ort` is absent from
 //! the dependency graph and this crate contains no ONNX runtime at all.
 
-use super::{dylib, Diarizer, SpeakerTurn};
+use super::{Diarizer, SpeakerTurn};
 use crate::error::{Error, Result};
+use crate::onnx;
 use crate::types::SAMPLE_RATE;
 
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ impl PolyvoiceDiarizer {
             }
         }
 
-        dylib::init_ort()?;
+        onnx::init_ort()?;
 
         let registry = polyvoice::models::ModelRegistry::default()
             .map_err(|e| Error::Diarize(format!("model registry construction failed: {e}")))?;
